@@ -10,3 +10,6 @@
 [submodule "submodules/paybot"]
 	path = submodules/paybot
 	url = https://github.com/superposition/paybot
+[submodule "submodules/halo"]
+	path = submodules/halo
+	url = https://github.com/humanlabs-kr/halo
