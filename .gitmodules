@@ -7,3 +7,6 @@
 [submodule "submodules/hubble-ai-trading"]
 	path = submodules/hubble-ai-trading
 	url = https://github.com/HubbleVision/hubble-ai-trading
+[submodule "submodules/paybot"]
+	path = submodules/paybot
+	url = https://github.com/superposition/paybot
