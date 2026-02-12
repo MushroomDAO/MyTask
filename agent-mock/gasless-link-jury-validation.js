@@ -38,12 +38,11 @@ async function bundlerRpc(url, method, params) {
 async function main() {
   const argv = process.argv.slice(2);
 
+  const mode = getArgValue(argv, "--mode") ?? process.env.MODE ?? "linkJuryValidation";
+
   const dryRun = parseBool(getArgValue(argv, "--dryRun"), true);
 
   const rpcUrl = getArgValue(argv, "--rpcUrl") ?? requireEnv("RPC_URL");
-  const bundlerUrl = getArgValue(argv, "--bundlerUrl") ?? requireEnv("BUNDLER_URL");
-  const privateKeyRaw = getArgValue(argv, "--privateKey") ?? requireEnv("PRIVATE_KEY");
-  const privateKey = privateKeyRaw.startsWith("0x") ? privateKeyRaw : `0x${privateKeyRaw}`;
 
   const chainId = Number(getArgValue(argv, "--chainId") ?? process.env.CHAIN_ID ?? "1");
 
@@ -51,10 +50,54 @@ async function main() {
     process.env.ENTRYPOINT_ADDRESS ??
     "0x0000000071727De22E5E9d8BAf0edAc6f37da032";
 
+  const taskEscrow = getArgValue(argv, "--taskEscrow") ?? requireEnv("TASK_ESCROW_ADDRESS");
+
+  const publicClient = createPublicClient({
+    chain: { id: chainId, name: "custom", nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 }, rpcUrls: { default: { http: [rpcUrl] } } },
+    transport: http(rpcUrl)
+  });
+
+  if (mode === "watchEvidence") {
+    const once = parseBool(getArgValue(argv, "--once"), false);
+    const evidenceEventAbi = [
+      {
+        type: "event",
+        name: "EvidenceSubmitted",
+        anonymous: false,
+        inputs: [
+          { indexed: true, name: "taskId", type: "bytes32" },
+          { indexed: false, name: "evidenceUri", type: "string" },
+          { indexed: false, name: "timestamp", type: "uint256" }
+        ]
+      }
+    ];
+
+    let unwatch = () => {};
+    unwatch = publicClient.watchContractEvent({
+      address: taskEscrow,
+      abi: evidenceEventAbi,
+      eventName: "EvidenceSubmitted",
+      onLogs: (logs) => {
+        for (const log of logs) {
+          const args = log.args ?? {};
+          process.stdout.write(JSON.stringify({ mode, address: taskEscrow, log: { ...log, args } }) + "\n");
+          if (once) {
+            unwatch();
+            process.exit(0);
+          }
+        }
+      }
+    });
+
+    return;
+  }
+
+  const bundlerUrl = getArgValue(argv, "--bundlerUrl") ?? requireEnv("BUNDLER_URL");
+  const privateKeyRaw = getArgValue(argv, "--privateKey") ?? requireEnv("PRIVATE_KEY");
+  const privateKey = privateKeyRaw.startsWith("0x") ? privateKeyRaw : `0x${privateKeyRaw}`;
   const superPaymaster = getArgValue(argv, "--paymaster") ?? requireEnv("SUPER_PAYMASTER_ADDRESS");
   const operator = getArgValue(argv, "--operator") ?? requireEnv("OPERATOR_ADDRESS");
   const aaAccount = getArgValue(argv, "--aaAccount") ?? requireEnv("AA_ACCOUNT_ADDRESS");
-  const taskEscrow = getArgValue(argv, "--taskEscrow") ?? requireEnv("TASK_ESCROW_ADDRESS");
 
   const taskId = getArgValue(argv, "--taskId") ?? requireEnv("TASK_ID");
   const juryTaskHash = getArgValue(argv, "--juryTaskHash") ?? requireEnv("JURY_TASK_HASH");
@@ -70,11 +113,6 @@ async function main() {
   const maxFeePerGas = BigInt(getArgValue(argv, "--maxFeePerGas") ?? process.env.MAX_FEE_PER_GAS ?? "2000000000");
 
   const account = privateKeyToAccount(privateKey);
-
-  const publicClient = createPublicClient({
-    chain: { id: chainId, name: "custom", nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 }, rpcUrls: { default: { http: [rpcUrl] } } },
-    transport: http(rpcUrl)
-  });
 
   const aaAbi = [
     { type: "function", name: "getNonce", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
@@ -178,4 +216,3 @@ main().catch((err) => {
   console.error(err);
   process.exit(1);
 });
-
