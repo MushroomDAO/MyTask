@@ -1,4 +1,5 @@
-# AAStar 四角色注册 / 陪审质押 / Gasless 代付 / Items+Actions 激励 / 外部 Agent（Mock）—— 单一评审文档（v0.1）
+# TotalSolution（v0.2）
+## AAStar 四角色注册 / 陪审质押 / Gasless 代付 / Items+Actions 激励 / 外部 Agent（Mock）—— 单一评审文档
 
 - 更新时间：2026-02-12
 - 覆盖仓库：
@@ -17,6 +18,7 @@
 6. 关键接口清单（合约 / SDK / 外部服务）
 7. 里程碑计划（合并旧 5 项目标）
 8. 风险与待定项
+9. 可验证证据（本地命令输出 + 代码锚点）
 
 ## 1. 背景与目标
 
@@ -161,9 +163,9 @@ flowchart TD
 
 基于 MyTask 的 TaskEscrow 合约实现，默认 shares 为 taskor 70% / supplierShare 20% / jury 10%，但 supplier 并不是“固定拿 20%”：
 
-- 有 supplier 时：supplier 领取的是 taskor 指定的 supplierFee（上限为 reward * supplierShare），并非固定 20%：[TaskEscrow.sol:L195-L214](file:///Volumes/UltraDisk/Dev2/aastar/MyTask/contracts/src/TaskEscrow.sol#L195-L214)
-- 没有 supplier 时：supplierShare 会在 taskor 与 jury 之间按 70/30 重新分配：[TaskEscrow.sol:L382-L390](file:///Volumes/UltraDisk/Dev2/aastar/MyTask/contracts/src/TaskEscrow.sol#L382-L390)
-- juryShare 默认是 10%，但不是“硬上限”：feeRecipient 可通过 setDistributionShares 全局调整三方 shares（要求总和=10000）：[TaskEscrow.sol:L405-L418](file:///Volumes/UltraDisk/Dev2/aastar/MyTask/contracts/src/TaskEscrow.sol#L405-L418)
+- 有 supplier 时：supplier 领取的是 taskor 指定的 supplierFee（上限为 reward * supplierShare），并非固定 20%：[TaskEscrow.sol:L186-L203](file:///Volumes/UltraDisk/Dev2/aastar/MyTask/contracts/src/TaskEscrow.sol#L186-L203)
+- 没有 supplier 时：supplierShare 会在 taskor 与 jury 之间按 70/30 重新分配：[TaskEscrow.sol:L352-L359](file:///Volumes/UltraDisk/Dev2/aastar/MyTask/contracts/src/TaskEscrow.sol#L352-L359)
+- juryShare 默认是 10%，但不是“硬上限”：feeRecipient 可通过 setDistributionShares 全局调整三方 shares（要求总和=10000）：[TaskEscrow.sol:L374-L380](file:///Volumes/UltraDisk/Dev2/aastar/MyTask/contracts/src/TaskEscrow.sol#L374-L380)
 
 ```mermaid
 flowchart TD
@@ -184,8 +186,8 @@ flowchart TD
 
 - “陪审结果”应当最终落到 linkJuryValidation → completeTask 触发分账
 - “陪审激励闭环”中的额外奖励（积分/NFT）不替代 escrow 分账，而是补贴与荣誉系统（由 MyShop items + actions 发放）
-- 关于“Supplier 是否应该拿钱”的结论（基于当前代码）：在 MyTask 的当前实现里，Supplier 被建模为“协作/资源提供方（可选）”，从 Community 赞助的 reward 中领取协商费用（supplierFee，上限为 supplierShare）。
-- 重要约束：当前实现中，若设置了 supplier 但 supplierFee < supplierShare 上限，会导致 reward 有一部分未被分配（留在 escrow 合约里）。这个语义需要业务侧约束 “supplierFee 必须等于上限”，或在合约里补充分配逻辑：[TaskEscrow.sol:L378-L390](file:///Volumes/UltraDisk/Dev2/aastar/MyTask/contracts/src/TaskEscrow.sol#L378-L390)
+- 关于“Supplier 是否应该拿钱”的结论（基于当前代码）：在 MyTask 的当前实现里，Supplier 被建模为“协作/资源提供方（可选）”，从 Community 出资的 reward 中领取协商费用（supplierFee，上限为 supplierShare）。
+- 重要语义坑（需要定案）：当前实现中，若设置了 supplier 但 supplierFee < supplierShare 上限，会导致 reward 有一部分未被分配（留在 escrow 合约里）。合约侧改造方向：自动把“未用完的 supplierShare”再分配/退回（建议作为 M3/M? 变更项的一部分）：[TaskEscrow.sol:L339-L362](file:///Volumes/UltraDisk/Dev2/aastar/MyTask/contracts/src/TaskEscrow.sol#L339-L362)
 
 ### 5.5 流程 E：陪审激励闭环（Supplier=Shop，奖励 Item + Action）
 
@@ -296,20 +298,31 @@ Agent Mock（HTTP / Webhook 任选一种实现）：
 ### M1：调研与对齐（基线确认 + 单一评审文档）
 
 - 目标：确认四角色注册/质押/退出费、Gasless 提交流程、Items+Actions 原子链路、Escrow 结算点
-- 产物：本文件（v0.1）+ 关键代码锚点（上文第 3/6 章）
+- 产物：本文件（v0.2）+ 关键代码锚点（上文第 3/6 章）+ 可验证证据（第 9 章）
 - 验收：评审可在本文件内完成需求对齐与下一步拆分
 
 ### M2：四角色 Registry 配置上线（管理员可控）
 
 - 目标：在 Registry 中创建并启用 ROLE_JURY/ROLE_PUBLISHER/ROLE_TASKER/ROLE_SUPPLIER
-- 产物：角色配置参数表（minStake/lockDuration/exitFeePercent 等）与部署/配置脚本或操作手册（不在本文展开）
+- 产物（已落地到代码）：
+  - 一键配置脚本（可重复执行，首次 create，后续 configure）：[ConfigureMyTaskRoles.s.sol](file:///Volumes/UltraDisk/Dev2/aastar/SuperPaymaster/contracts/script/v3/ConfigureMyTaskRoles.s.sol)
+  - 单测覆盖：在 Registry 测试中新增 MyTask 四角色创建用例：[RegistryV3NewFeatures.t.sol](file:///Volumes/UltraDisk/Dev2/aastar/SuperPaymaster/contracts/test/v3/RegistryV3NewFeatures.t.sol)
+- 执行方式（示例，按你们的 RPC/地址填充）：
+  - 环境变量：
+    - PRIVATE_KEY：部署/管理员私钥（需要是 Registry owner）
+    - REGISTRY_ADDRESS：目标 Registry 地址
+    - MYTASK_ROLE_OWNER：四个业务角色的 roleOwner（后续可用它来 configureRole）
+  - 执行命令：
+    - forge script contracts/script/v3/ConfigureMyTaskRoles.s.sol:ConfigureMyTaskRoles --rpc-url $RPC_URL --broadcast
 - 验收：
-  - 能通过 SDK createNewRole / configureRole 完成配置
-  - 用户能先 ENDUSER 再 registerRoleSelf 到业务角色
+  - 管理员可 createNewRole，并可通过 configureRole 调整 RoleConfig
+  - 用户可先 ENDUSER 再 registerRoleSelf 到业务角色
 
 ### M3：陪审员质押注册与 Escrow 结算对接
 
 - 目标：把“陪审资格（质押）→ 陪审任务 → 结果回写 → escrow 分账”跑通
+- 变更项（建议纳入 M3 或 M3.5）：
+  - 处理“supplier 已设置但 supplierFee 未打满上限”的未分配余额语义：合约侧自动把未用完的 supplierShare 再分配/退回
 - 产物：JuryContract 与 TaskEscrow 的对接点约定（juryTaskHash / decision）
 - 验收：
   - 任务从 SUBMITTED → VALIDATED → COMPLETED 可闭环
@@ -335,6 +348,32 @@ Agent Mock（HTTP / Webhook 任选一种实现）：
 
 - Registry 对自定义角色 roleData 目前只原生处理 uint256 stake（除 ENDUSER/COMMUNITY 外）：若需要更丰富的角色元数据，需扩展 Registry 或改为链外存储 + SBT metadata 绑定。
 - MyShop 的 action 白名单机制（allowedActions）要求平台 owner 预先允许 action 合约：[MyShopItems.sol:L182-L185](file:///Volumes/UltraDisk/Dev2/aastar/MyShop/contracts/src/MyShopItems.sol#L182-L185)
-- TaskEscrow 的分配 shares 是合约级全局参数（feeRecipient 可改），不是“每个 task 单独配置”；每 task 仅能通过 supplierFee 做有限度偏移：[TaskEscrow.sol:L405-L418](file:///Volumes/UltraDisk/Dev2/aastar/MyTask/contracts/src/TaskEscrow.sol#L405-L418)
+- TaskEscrow 的分配 shares 是合约级全局参数（feeRecipient 可改），不是“每个 task 单独配置”；每 task 仅能通过 supplierFee 做有限度偏移：[TaskEscrow.sol:L374-L380](file:///Volumes/UltraDisk/Dev2/aastar/MyTask/contracts/src/TaskEscrow.sol#L374-L380)
+- supplier 已设置但 supplierFee 未打满上限会导致余额留在 escrow（需要合约/业务约束定案）：[TaskEscrow.sol:L339-L362](file:///Volumes/UltraDisk/Dev2/aastar/MyTask/contracts/src/TaskEscrow.sol#L339-L362)
 - Gasless 提交流程对 bundler/paymaster 配置依赖较强：需要明确 bundlerUrl、paymasterAddress、operator（SuperPaymaster 模式）等运行时参数来源。
 - Agent Mock 的幂等与重试：需要以链上事件 + nonce（或 taskId 维度状态机）保证“至少一次”执行不会造成重复发奖/重复回写。
+
+## 9. 可验证证据（本地命令输出 + 代码锚点）
+
+### 9.1 M1：MyTask 合约测试通过（可复现）
+
+- 修复/补齐 Foundry 依赖（初始化 submodule）：
+  - 目录：/Volumes/UltraDisk/Dev2/aastar/MyTask/contracts
+  - 命令：git submodule update --init --recursive
+- 单测通过（46/46）：
+  - 目录：/Volumes/UltraDisk/Dev2/aastar/MyTask/contracts
+  - 命令：forge test
+  - 结果摘要：3 suites，46 tests passed，0 failed
+- 格式化检查通过：
+  - 目录：/Volumes/UltraDisk/Dev2/aastar/MyTask/contracts
+  - 命令：forge fmt --check
+
+### 9.2 M2：四角色配置脚本与测试锚点
+
+- 脚本（可上链执行）：
+  - [ConfigureMyTaskRoles.s.sol](file:///Volumes/UltraDisk/Dev2/aastar/SuperPaymaster/contracts/script/v3/ConfigureMyTaskRoles.s.sol)
+- 测试（覆盖 createNewRole 与 exitFee 同步）：
+  - [RegistryV3NewFeatures.t.sol](file:///Volumes/UltraDisk/Dev2/aastar/SuperPaymaster/contracts/test/v3/RegistryV3NewFeatures.t.sol)
+
+注：当前运行环境自带 solc 版本为 0.8.28（SuperPaymaster 需要 0.8.33），因此这里无法直接在本环境执行 SuperPaymaster 的 forge build/test；但上述脚本与测试代码可在你们的 SuperPaymaster 标准构建环境中直接验证。
+
