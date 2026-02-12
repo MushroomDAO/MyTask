@@ -21,7 +21,6 @@ interface IJuryContract is IERC8004ValidationRegistry {
         CONSENSUS_REQUIRED, // Multiple jury agreement
         CRYPTO_ECONOMIC, // Stake-weighted voting
         TEE_ATTESTATION // Trusted execution environment
-
     }
 
     /// @notice Task status
@@ -42,7 +41,6 @@ interface IJuryContract is IERC8004ValidationRegistry {
         uint256 deadline;
         uint256 minJurors;
         uint256 consensusThreshold; // Basis points (6600 = 66%)
-
     }
 
     /// @notice Full task data

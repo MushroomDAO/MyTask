@@ -4,10 +4,10 @@ pragma solidity ^0.8.23;
 /**
  * @title ITaskEscrow
  * @notice Interface for the four-party task escrow system
- * @dev Manages fund flow between Sponsor, Taskor, Supplier, and Jury
+ * @dev Manages fund flow between Community, Taskor, Supplier, and Jury
  *
  * Economic Model:
- * - Sponsor: Creates and funds tasks
+ * - Community: Creates and funds tasks
  * - Taskor: Executes tasks (receives 70% of reward)
  * - Supplier: Provides resources (receives 20% of reward)
  * - Jury: Validates completion (receives 10% of reward)
@@ -19,15 +19,15 @@ interface ITaskEscrow {
 
     /// @notice Task lifecycle states
     enum TaskState {
-        CREATED,      // Task created, funds escrowed
-        ACCEPTED,     // Taskor accepted the task
-        IN_PROGRESS,  // Task execution started
-        SUBMITTED,    // Evidence submitted for review
-        VALIDATED,    // Jury validated completion
-        COMPLETED,    // Funds distributed
-        DISPUTED,     // Under dispute resolution
-        CANCELLED,    // Task cancelled
-        EXPIRED       // Task deadline passed
+        CREATED, // Task created, funds escrowed
+        ACCEPTED, // Taskor accepted the task
+        IN_PROGRESS, // Task execution started
+        SUBMITTED, // Evidence submitted for review
+        VALIDATED, // Jury validated completion
+        COMPLETED, // Funds distributed
+        DISPUTED, // Under dispute resolution
+        CANCELLED, // Task cancelled
+        EXPIRED // Task deadline passed
     }
 
     // ====================================
@@ -36,18 +36,18 @@ interface ITaskEscrow {
 
     /// @notice Task creation parameters
     struct CreateTaskParams {
-        address token;              // Payment token (ERC-20)
-        uint256 reward;             // Total reward amount
-        uint256 deadline;           // Task deadline timestamp
-        uint256 minJurors;          // Minimum jurors for validation
-        string metadataUri;         // IPFS URI for task details
-        bytes32 taskType;           // Task category
+        address token; // Payment token (ERC-20)
+        uint256 reward; // Total reward amount
+        uint256 deadline; // Task deadline timestamp
+        uint256 minJurors; // Minimum jurors for validation
+        string metadataUri; // IPFS URI for task details
+        bytes32 taskType; // Task category
     }
 
     /// @notice Full task data
     struct TaskData {
         bytes32 taskId;
-        address sponsor;
+        address community;
         address taskor;
         address supplier;
         address token;
@@ -60,14 +60,14 @@ interface ITaskEscrow {
         string evidenceUri;
         bytes32 taskType;
         uint256 minJurors;
-        bytes32 juryTaskHash;       // Reference to JuryContract task
+        bytes32 juryTaskHash; // Reference to JuryContract task
     }
 
     /// @notice Distribution shares (in basis points, 10000 = 100%)
     struct DistributionShares {
-        uint256 taskorShare;        // Default: 7000 (70%)
-        uint256 supplierShare;      // Default: 2000 (20%)
-        uint256 juryShare;          // Default: 1000 (10%)
+        uint256 taskorShare; // Default: 7000 (70%)
+        uint256 supplierShare; // Default: 2000 (20%)
+        uint256 juryShare; // Default: 1000 (10%)
     }
 
     // ====================================
@@ -75,60 +75,24 @@ interface ITaskEscrow {
     // ====================================
 
     event TaskCreated(
-        bytes32 indexed taskId,
-        address indexed sponsor,
-        address token,
-        uint256 reward,
-        uint256 deadline
+        bytes32 indexed taskId, address indexed community, address token, uint256 reward, uint256 deadline
     );
 
-    event TaskAccepted(
-        bytes32 indexed taskId,
-        address indexed taskor,
-        uint256 timestamp
-    );
+    event TaskAccepted(bytes32 indexed taskId, address indexed taskor, uint256 timestamp);
 
-    event SupplierAssigned(
-        bytes32 indexed taskId,
-        address indexed supplier,
-        uint256 fee
-    );
+    event SupplierAssigned(bytes32 indexed taskId, address indexed supplier, uint256 fee);
 
-    event EvidenceSubmitted(
-        bytes32 indexed taskId,
-        string evidenceUri,
-        uint256 timestamp
-    );
+    event EvidenceSubmitted(bytes32 indexed taskId, string evidenceUri, uint256 timestamp);
 
-    event TaskValidated(
-        bytes32 indexed taskId,
-        bytes32 indexed juryTaskHash,
-        uint8 response
-    );
+    event TaskValidated(bytes32 indexed taskId, bytes32 indexed juryTaskHash, uint8 response);
 
-    event TaskCompleted(
-        bytes32 indexed taskId,
-        uint256 taskorPayout,
-        uint256 supplierPayout,
-        uint256 juryPayout
-    );
+    event TaskCompleted(bytes32 indexed taskId, uint256 taskorPayout, uint256 supplierPayout, uint256 juryPayout);
 
-    event TaskDisputed(
-        bytes32 indexed taskId,
-        address indexed disputant,
-        string reason
-    );
+    event TaskDisputed(bytes32 indexed taskId, address indexed disputant, string reason);
 
-    event TaskCancelled(
-        bytes32 indexed taskId,
-        uint256 refundAmount
-    );
+    event TaskCancelled(bytes32 indexed taskId, uint256 refundAmount);
 
-    event FundsDistributed(
-        bytes32 indexed taskId,
-        address indexed recipient,
-        uint256 amount
-    );
+    event FundsDistributed(bytes32 indexed taskId, address indexed recipient, uint256 amount);
 
     // ====================================
     // Task Lifecycle
@@ -142,7 +106,7 @@ interface ITaskEscrow {
     function createTask(CreateTaskParams calldata params) external returns (bytes32 taskId);
 
     /**
-     * @notice Create task with EIP-2612 permit (gasless for sponsor)
+     * @notice Create task with EIP-2612 permit (gasless for community)
      * @param params Task creation parameters
      * @param deadline Permit deadline
      * @param v Signature v
@@ -150,13 +114,9 @@ interface ITaskEscrow {
      * @param s Signature s
      * @return taskId Unique task identifier
      */
-    function createTaskWithPermit(
-        CreateTaskParams calldata params,
-        uint256 deadline,
-        uint8 v,
-        bytes32 r,
-        bytes32 s
-    ) external returns (bytes32 taskId);
+    function createTaskWithPermit(CreateTaskParams calldata params, uint256 deadline, uint8 v, bytes32 r, bytes32 s)
+        external
+        returns (bytes32 taskId);
 
     /**
      * @notice Accept a task as taskor
@@ -223,11 +183,11 @@ interface ITaskEscrow {
     function getTask(bytes32 taskId) external view returns (TaskData memory task);
 
     /**
-     * @notice Get tasks by sponsor
-     * @param sponsor Sponsor address
+     * @notice Get tasks by community
+     * @param community Community address
      * @return taskIds Array of task IDs
      */
-    function getTasksBySponsor(address sponsor) external view returns (bytes32[] memory taskIds);
+    function getTasksByCommunity(address community) external view returns (bytes32[] memory taskIds);
 
     /**
      * @notice Get tasks by taskor

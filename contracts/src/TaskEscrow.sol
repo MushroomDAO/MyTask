@@ -9,7 +9,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
  * @title TaskEscrow
  * @notice Four-party task escrow with gasless payment support
  * @dev Implements the MyTask economic model:
- *      - Sponsor creates and funds tasks
+ *      - Community creates and funds tasks
  *      - Taskor executes tasks (70% reward)
  *      - Supplier provides resources (20% reward)
  *      - Jury validates completion (10% reward)
@@ -28,9 +28,9 @@ contract TaskEscrow is ITaskEscrow {
     // ====================================
 
     uint256 public constant BASIS_POINTS = 10000;
-    uint256 public constant DEFAULT_TASKOR_SHARE = 7000;   // 70%
+    uint256 public constant DEFAULT_TASKOR_SHARE = 7000; // 70%
     uint256 public constant DEFAULT_SUPPLIER_SHARE = 2000; // 20%
-    uint256 public constant DEFAULT_JURY_SHARE = 1000;     // 10%
+    uint256 public constant DEFAULT_JURY_SHARE = 1000; // 10%
 
     // ====================================
     // State Variables
@@ -58,8 +58,8 @@ contract TaskEscrow is ITaskEscrow {
     /// @notice Task data by ID
     mapping(bytes32 => TaskData) private _tasks;
 
-    /// @notice Tasks by sponsor
-    mapping(address => bytes32[]) private _sponsorTasks;
+    /// @notice Tasks by community
+    mapping(address => bytes32[]) private _communityTasks;
 
     /// @notice Tasks by taskor
     mapping(address => bytes32[]) private _taskorTasks;
@@ -79,8 +79,8 @@ contract TaskEscrow is ITaskEscrow {
         _;
     }
 
-    modifier onlySponsor(bytes32 taskId) {
-        require(_tasks[taskId].sponsor == msg.sender, "Not sponsor");
+    modifier onlyCommunity(bytes32 taskId) {
+        require(_tasks[taskId].community == msg.sender, "Not community");
         _;
     }
 
@@ -105,9 +105,7 @@ contract TaskEscrow is ITaskEscrow {
         feeRecipient = _feeRecipient;
 
         _distributionShares = DistributionShares({
-            taskorShare: DEFAULT_TASKOR_SHARE,
-            supplierShare: DEFAULT_SUPPLIER_SHARE,
-            juryShare: DEFAULT_JURY_SHARE
+            taskorShare: DEFAULT_TASKOR_SHARE, supplierShare: DEFAULT_SUPPLIER_SHARE, juryShare: DEFAULT_JURY_SHARE
         });
     }
 
@@ -121,13 +119,10 @@ contract TaskEscrow is ITaskEscrow {
     }
 
     /// @inheritdoc ITaskEscrow
-    function createTaskWithPermit(
-        CreateTaskParams calldata params,
-        uint256 deadline,
-        uint8 v,
-        bytes32 r,
-        bytes32 s
-    ) external returns (bytes32 taskId) {
+    function createTaskWithPermit(CreateTaskParams calldata params, uint256 deadline, uint8 v, bytes32 r, bytes32 s)
+        external
+        returns (bytes32 taskId)
+    {
         // Execute permit
         IERC20Permit(params.token).permit(msg.sender, address(this), params.reward, deadline, v, r, s);
 
@@ -137,25 +132,22 @@ contract TaskEscrow is ITaskEscrow {
     /**
      * @dev Internal task creation logic
      */
-    function _createTask(CreateTaskParams calldata params, address sponsor) internal returns (bytes32 taskId) {
+    function _createTask(CreateTaskParams calldata params, address community) internal returns (bytes32 taskId) {
         require(params.reward > 0, "Reward must be > 0");
         require(params.deadline > block.timestamp, "Invalid deadline");
         require(params.minJurors > 0, "Min jurors must be > 0");
 
         // Generate unique task ID
         _taskCounter++;
-        taskId = keccak256(abi.encode(sponsor, _taskCounter, block.timestamp, params.taskType));
+        taskId = keccak256(abi.encode(community, _taskCounter, block.timestamp, params.taskType));
 
         // Transfer funds to escrow
-        require(
-            IERC20(params.token).transferFrom(sponsor, address(this), params.reward),
-            "Transfer failed"
-        );
+        require(IERC20(params.token).transferFrom(community, address(this), params.reward), "Transfer failed");
 
         // Create task
         _tasks[taskId] = TaskData({
             taskId: taskId,
-            sponsor: sponsor,
+            community: community,
             taskor: address(0),
             supplier: address(0),
             token: params.token,
@@ -171,9 +163,9 @@ contract TaskEscrow is ITaskEscrow {
             juryTaskHash: bytes32(0)
         });
 
-        _sponsorTasks[sponsor].push(taskId);
+        _communityTasks[community].push(taskId);
 
-        emit TaskCreated(taskId, sponsor, params.token, params.reward, params.deadline);
+        emit TaskCreated(taskId, community, params.token, params.reward, params.deadline);
 
         return taskId;
     }
@@ -194,10 +186,7 @@ contract TaskEscrow is ITaskEscrow {
     /// @inheritdoc ITaskEscrow
     function assignSupplier(bytes32 taskId, address supplier, uint256 fee) external onlyTaskor(taskId) {
         TaskData storage task = _tasks[taskId];
-        require(
-            task.state == TaskState.ACCEPTED || task.state == TaskState.IN_PROGRESS,
-            "Invalid state"
-        );
+        require(task.state == TaskState.ACCEPTED || task.state == TaskState.IN_PROGRESS, "Invalid state");
         require(supplier != address(0), "Invalid supplier");
 
         // Supplier fee cannot exceed supplier share
@@ -216,10 +205,7 @@ contract TaskEscrow is ITaskEscrow {
     /// @inheritdoc ITaskEscrow
     function submitEvidence(bytes32 taskId, string calldata evidenceUri) external onlyTaskor(taskId) {
         TaskData storage task = _tasks[taskId];
-        require(
-            task.state == TaskState.ACCEPTED || task.state == TaskState.IN_PROGRESS,
-            "Invalid state"
-        );
+        require(task.state == TaskState.ACCEPTED || task.state == TaskState.IN_PROGRESS, "Invalid state");
         require(bytes(evidenceUri).length > 0, "Empty evidence");
 
         task.evidenceUri = evidenceUri;
@@ -236,10 +222,7 @@ contract TaskEscrow is ITaskEscrow {
         // Verify jury task exists and is completed
         IJuryContract.Task memory juryTask = IJuryContract(juryContract).getTask(juryTaskHash);
         require(juryTask.taskHash == juryTaskHash, "Jury task not found");
-        require(
-            juryTask.status == IJuryContract.TaskStatus.COMPLETED,
-            "Jury validation not complete"
-        );
+        require(juryTask.status == IJuryContract.TaskStatus.COMPLETED, "Jury validation not complete");
 
         task.juryTaskHash = juryTaskHash;
         task.state = TaskState.VALIDATED;
@@ -283,15 +266,11 @@ contract TaskEscrow is ITaskEscrow {
     function raiseDispute(bytes32 taskId, string calldata reason) external {
         TaskData storage task = _tasks[taskId];
         require(
-            msg.sender == task.sponsor ||
-            msg.sender == task.taskor ||
-            msg.sender == task.supplier,
-            "Not participant"
+            msg.sender == task.community || msg.sender == task.taskor || msg.sender == task.supplier, "Not participant"
         );
         require(
-            task.state == TaskState.IN_PROGRESS ||
-            task.state == TaskState.SUBMITTED ||
-            task.state == TaskState.VALIDATED,
+            task.state == TaskState.IN_PROGRESS || task.state == TaskState.SUBMITTED
+                || task.state == TaskState.VALIDATED,
             "Cannot dispute"
         );
 
@@ -301,38 +280,28 @@ contract TaskEscrow is ITaskEscrow {
     }
 
     /// @inheritdoc ITaskEscrow
-    function cancelTask(bytes32 taskId) external onlySponsor(taskId) onlyTaskState(taskId, TaskState.CREATED) {
+    function cancelTask(bytes32 taskId) external onlyCommunity(taskId) onlyTaskState(taskId, TaskState.CREATED) {
         TaskData storage task = _tasks[taskId];
 
         uint256 refundAmount = task.reward;
         task.state = TaskState.CANCELLED;
 
-        // Refund sponsor
-        require(
-            IERC20(task.token).transfer(task.sponsor, refundAmount),
-            "Refund failed"
-        );
+        // Refund community
+        require(IERC20(task.token).transfer(task.community, refundAmount), "Refund failed");
 
         emit TaskCancelled(taskId, refundAmount);
     }
 
     /// @inheritdoc ITaskEscrow
-    function claimExpiredRefund(bytes32 taskId) external onlySponsor(taskId) {
+    function claimExpiredRefund(bytes32 taskId) external onlyCommunity(taskId) {
         TaskData storage task = _tasks[taskId];
         require(block.timestamp > task.deadline, "Not expired");
-        require(
-            task.state == TaskState.CREATED ||
-            task.state == TaskState.ACCEPTED,
-            "Cannot refund"
-        );
+        require(task.state == TaskState.CREATED || task.state == TaskState.ACCEPTED, "Cannot refund");
 
         uint256 refundAmount = task.reward;
         task.state = TaskState.EXPIRED;
 
-        require(
-            IERC20(task.token).transfer(task.sponsor, refundAmount),
-            "Refund failed"
-        );
+        require(IERC20(task.token).transfer(task.community, refundAmount), "Refund failed");
 
         emit TaskCancelled(taskId, refundAmount);
     }
@@ -347,8 +316,8 @@ contract TaskEscrow is ITaskEscrow {
     }
 
     /// @inheritdoc ITaskEscrow
-    function getTasksBySponsor(address sponsor) external view returns (bytes32[] memory taskIds) {
-        return _sponsorTasks[sponsor];
+    function getTasksByCommunity(address community) external view returns (bytes32[] memory taskIds) {
+        return _communityTasks[community];
     }
 
     /// @inheritdoc ITaskEscrow
@@ -386,7 +355,7 @@ contract TaskEscrow is ITaskEscrow {
             // No supplier - split supplier share between taskor and jury
             uint256 unusedSupplierShare = (reward * _distributionShares.supplierShare) / BASIS_POINTS;
             taskorPayout += (unusedSupplierShare * 7) / 10; // 70% to taskor
-            juryPayout += (unusedSupplierShare * 3) / 10;   // 30% to jury
+            juryPayout += (unusedSupplierShare * 3) / 10; // 30% to jury
         }
 
         return (taskorPayout, supplierPayout, juryPayout);
@@ -402,19 +371,12 @@ contract TaskEscrow is ITaskEscrow {
      * @param supplierShare New supplier share in basis points
      * @param juryShare New jury share in basis points
      */
-    function setDistributionShares(
-        uint256 taskorShare,
-        uint256 supplierShare,
-        uint256 juryShare
-    ) external {
+    function setDistributionShares(uint256 taskorShare, uint256 supplierShare, uint256 juryShare) external {
         require(msg.sender == feeRecipient, "Not authorized");
         require(taskorShare + supplierShare + juryShare == BASIS_POINTS, "Must sum to 10000");
 
-        _distributionShares = DistributionShares({
-            taskorShare: taskorShare,
-            supplierShare: supplierShare,
-            juryShare: juryShare
-        });
+        _distributionShares =
+            DistributionShares({taskorShare: taskorShare, supplierShare: supplierShare, juryShare: juryShare});
     }
 
     /**
@@ -431,13 +393,6 @@ contract TaskEscrow is ITaskEscrow {
  * @notice ERC-20 Permit interface (EIP-2612)
  */
 interface IERC20Permit {
-    function permit(
-        address owner,
-        address spender,
-        uint256 value,
-        uint256 deadline,
-        uint8 v,
-        bytes32 r,
-        bytes32 s
-    ) external;
+    function permit(address owner, address spender, uint256 value, uint256 deadline, uint8 v, bytes32 r, bytes32 s)
+        external;
 }

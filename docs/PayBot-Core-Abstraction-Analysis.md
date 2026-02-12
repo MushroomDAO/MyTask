@@ -330,7 +330,7 @@ Escrow.createPaymentWithPermit():
 ### 1. 无气费支付在 MyTask 中的应用
 
 **当前 MyTask 问题**:
-- Sponsor 需要有 ETH/Gas 来创建任务
+- Community 需要有 ETH/Gas 来创建任务
 - Taskor 需要有 ETH 来完成支付
 - Supplier 需要有 ETH 来提交资源
 - Jury 需要有 ETH 来参与审计
@@ -341,17 +341,17 @@ Escrow.createPaymentWithPermit():
 ```
 MyTask + Facilitator:
 ┌──────────────────────────────────────────┐
-│ Sponsor (任务发起)                       │
+│ Community (任务发起)                     │
 │ ├─ 签署: "创建任务，赞助 100 USDC"     │
 │ ├─ 签署: "支付期限 7 天"                │
 │ └─ 无需 ETH!                            │
 └──────────────────────────────────────────┘
 
-促进者: 代表 Sponsor 提交链上交易 (支付 Gas)
+促进者: 代表 Community 提交链上交易 (支付 Gas)
 费用: 从任务赞助额中提取 (约 0.5%)
 
 益处:
-✅ Sponsor 无需持有多个币种
+✅ Community 无需持有多个币种
 ✅ 用户体验简化
 ✅ 全球参与者无需管理 Gas
 ```
@@ -420,7 +420,7 @@ REFUNDED (过期后用户退款)
 PENDING (任务发布)
   ├─ 赞助资金在 Escrow
   ├─ Taskor 可以接受
-  ├─ Sponsor 可以取消 (退款)
+  ├─ Community 可以取消 (退款)
   └─ Jury 可以监督
 
 IN_PROGRESS (Taskor 正在执行)
@@ -495,7 +495,7 @@ class MyTaskPaymentProtocol implements PaymentProtocol {
     // 创建任务支付意图
     return {
       taskId: options.metadata.taskId,
-      sponsor: options.payer,
+      community: options.payer,
       taskor: options.recipient,
       amount: options.amount,
       terms: {
@@ -507,21 +507,21 @@ class MyTaskPaymentProtocol implements PaymentProtocol {
   }
 
   signPayment(intent, signer) {
-    // Sponsor 签署支付意图
+    // Community 签署支付意图
     // 包含任务条款与交付物
     return {
       paymentIntent: intent,
-      sponsorSignature: sign(intent),
+      communitySignature: sign(intent),
       timestamp: now()
     }
   }
 
   verifyPayment(signed) {
-    // 验证 Sponsor 是否确实授权
+    // 验证 Community 是否确实授权
     // 验证签署的条款是否有效
     return {
-      valid: verifySignature(signed.sponsorSignature),
-      signer: recoverSigner(signed.sponsorSignature)
+      valid: verifySignature(signed.communitySignature),
+      signer: recoverSigner(signed.communitySignature)
     }
   }
 
@@ -679,8 +679,8 @@ app.use("/api/*",
 // 2. 角色中间件 - 负责角色验证
 app.use("/api/*",
   roleMiddleware({
-    "/sponsor/*": ["sponsor"],
-    "/taskor/*": ["taskor", "sponsor"],
+    "/community/*": ["community"],
+    "/taskor/*": ["taskor", "community"],
     "/supplier/*": ["supplier"],
     "/jury/*": ["jury"]
   })
@@ -713,7 +713,7 @@ app.get("/api/taskor/tasks/:id", (req, res) => {
 ────────────────────────────────────────────────────
 支付方式          EIP-2612 + EIP-712   x402 支付拦截
 用户体验          一步到位 (签署)      多步 (选择支付方式)
-Gas 成本          由促进者承担         由赞助商承担
+Gas 成本          由促进者承担         由社区承担
 协议焦点          微支付与资源访问      支付与行为匹配
 扩展性            高 (通用协议)        高 (支付市场)
 
@@ -790,7 +790,7 @@ MyTask Integration
   └─ 性能优化
 
 阶段 4 (Week 4-5): 添加 Payload Exchange 概念
-  ├─ 赞助商支付
+  ├─ 社区代付
   ├─ 支付市场
   └─ 行为匹配
 ```
@@ -805,7 +805,7 @@ MyTask Integration
 // MyTask: 任务访问支付
 interface TaskPaymentGate {
   taskId: TaskId
-  sponsor: Address
+  community: Address
   taskor: Address
   amount: Amount
   duration: Duration
@@ -813,27 +813,27 @@ interface TaskPaymentGate {
 }
 
 async function createTaskPayment(gate: TaskPaymentGate) {
-  // 1. Sponsor 签署支付意图
+  // 1. Community 签署支付意图
   const paymentIntent = {
     taskId: gate.taskId,
     amount: gate.amount,
     terms: gate.terms
   }
 
-  const sponsorSig = await signer.signTypedData(paymentIntent)
+  const communitySig = await signer.signTypedData(paymentIntent)
 
   // 2. 前端发送带签名的请求
   const response = await fetch("/task/create", {
     method: "POST",
     headers: {
-      "X-PAYMENT-SIGNATURE": sponsorSig,
+      "X-PAYMENT-SIGNATURE": communitySig,
       "X-PAYMENT-DATA": JSON.stringify(paymentIntent)
     }
   })
 
   // 3. 后端验证与清算
-  const verified = await facilitator.verify(sponsorSig)
-  const settled = await facilitator.settle(sponsorSig)
+  const verified = await facilitator.verify(communitySig)
+  const settled = await facilitator.settle(communitySig)
 
   // 4. 创建任务并授予访问权
   const task = await createTask({
@@ -1052,4 +1052,3 @@ async function allocatePayment(
 **相关视频**: paybot-demo.mp4 (28MB)
 **核心概念**: Facilitator Pattern, Gasless Payments, X402 Protocol
 **对 MyTask 的影响**: 基础支付架构范式转变
-

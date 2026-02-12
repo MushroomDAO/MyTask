@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project Overview
 
 **MyTask** is an AI-powered, decentralized task management application built on the x402 protocol. It implements a four-player economic model:
-- **Task Publisher (Sponsor)**: Creates and funds tasks
+- **Task Publisher (Community)**: Creates and funds tasks
 - **Taskor**: Executes the task
 - **Target Item Supplier**: Provides resources needed by the Taskor
 - **Jury**: Audits and validates task completion
@@ -69,7 +69,7 @@ When the project grows, follow this structure:
 ### Smart Contracts
 - x402 protocol compliance
 - Token escrow and distribution
-- Role management (Sponsor, Taskor, Supplier, Jury)
+- Role management (Community, Taskor, Supplier, Jury)
 - Dispute resolution mechanics
 
 ### Application Logic

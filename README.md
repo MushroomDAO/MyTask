@@ -14,14 +14,14 @@ AI-powered, permissionless task marketplace built on x402 protocol with four-par
 ```mermaid
 flowchart TB
     subgraph Users["👥 Four Roles"]
-        S[("🎯 Sponsor<br/>Task Publisher")]
+        S[("🏛️ Community<br/>Task Publisher")]
         T[("⚡ Taskor<br/>Task Executor")]
         P[("📦 Supplier<br/>Resource Provider")]
         J[("⚖️ Jury<br/>Validator")]
     end
 
     subgraph Agents["🤖 AI Agent Layer"]
-        SA["Sponsor Agent<br/>Budget Optimization"]
+        SA["Community Agent<br/>Budget Optimization"]
         TA["Taskor Agent<br/>Task Matching"]
         PA["Supplier Agent<br/>Pricing Strategy"]
         JA["Jury Agent<br/>Evidence Analysis"]
@@ -66,7 +66,7 @@ flowchart TB
 
 | Role | Responsibility | AI Agent Function | Incentive |
 |------|----------------|-------------------|-----------|
-| **Sponsor** | Create & fund tasks | Budget optimization, risk assessment | Task completion value |
+| **Community** | Publish & fund tasks | Budget optimization, risk assessment | Task completion value |
 | **Taskor** | Execute tasks | Task matching, execution planning | Task reward (70%) |
 | **Supplier** | Provide resources | Dynamic pricing, inventory management | Resource fee (20%) |
 | **Jury** | Validate completion | Evidence analysis, consensus voting | Validation fee (10%) |
@@ -84,7 +84,7 @@ flowchart TB
 
 ```mermaid
 sequenceDiagram
-    participant S as Sponsor Agent
+    participant S as Community Agent
     participant T as Taskor Agent
     participant P as Supplier Agent
     participant J as Jury Agent
@@ -188,14 +188,14 @@ MIT License - Open source and permissionless.
 ```mermaid
 flowchart TB
     subgraph Users["👥 四个角色"]
-        S[("🎯 赞助商<br/>任务发布者")]
+        S[("🏛️ 社区<br/>任务发布者")]
         T[("⚡ 执行者<br/>任务执行者")]
         P[("📦 供应商<br/>资源提供者")]
         J[("⚖️ 陪审团<br/>验证者")]
     end
 
     subgraph Agents["🤖 AI 代理层"]
-        SA["赞助商代理<br/>预算优化"]
+        SA["社区代理<br/>预算优化"]
         TA["执行者代理<br/>任务匹配"]
         PA["供应商代理<br/>定价策略"]
         JA["陪审团代理<br/>证据分析"]
@@ -240,7 +240,7 @@ flowchart TB
 
 | 角色 | 职责 | AI 代理功能 | 激励 |
 |------|------|-------------|------|
-| **赞助商 (Sponsor)** | 创建并资助任务 | 预算优化、风险评估 | 任务完成价值 |
+| **社区 (Community)** | 发布并资助任务 | 预算优化、风险评估 | 任务完成价值 |
 | **执行者 (Taskor)** | 执行任务 | 任务匹配、执行规划 | 任务奖励 (70%) |
 | **供应商 (Supplier)** | 提供资源 | 动态定价、库存管理 | 资源费用 (20%) |
 | **陪审团 (Jury)** | 验证完成情况 | 证据分析、共识投票 | 验证费用 (10%) |
@@ -258,7 +258,7 @@ flowchart TB
 
 ```mermaid
 sequenceDiagram
-    participant S as 赞助商代理
+    participant S as 社区代理
     participant T as 执行者代理
     participant P as 供应商代理
     participant J as 陪审团代理

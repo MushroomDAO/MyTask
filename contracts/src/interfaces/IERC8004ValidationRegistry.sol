@@ -13,10 +13,7 @@ interface IERC8004ValidationRegistry {
 
     /// @notice Emitted when validation is requested
     event ValidationRequest(
-        address indexed validatorAddress,
-        uint256 indexed agentId,
-        string requestUri,
-        bytes32 indexed requestHash
+        address indexed validatorAddress, uint256 indexed agentId, string requestUri, bytes32 indexed requestHash
     );
 
     /// @notice Emitted when validation response is submitted
@@ -79,13 +76,7 @@ interface IERC8004ValidationRegistry {
     function getValidationStatus(bytes32 requestHash)
         external
         view
-        returns (
-            address validatorAddress,
-            uint256 agentId,
-            uint8 response,
-            bytes32 tag,
-            uint256 lastUpdate
-        );
+        returns (address validatorAddress, uint256 agentId, uint8 response, bytes32 tag, uint256 lastUpdate);
 
     /**
      * @notice Get validation summary for agent

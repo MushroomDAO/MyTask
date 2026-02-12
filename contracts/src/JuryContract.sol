@@ -171,7 +171,9 @@ contract JuryContract is IJuryContract {
         _jurorVoteIndex[taskHash][msg.sender] = _taskVotes[taskHash].length;
 
         _taskVotes[taskHash].push(
-            Vote({juror: msg.sender, response: response, reasoning: reasoning, timestamp: block.timestamp, slashed: false})
+            Vote({
+                juror: msg.sender, response: response, reasoning: reasoning, timestamp: block.timestamp, slashed: false
+            })
         );
 
         task.totalVotes++;
@@ -319,9 +321,12 @@ contract JuryContract is IJuryContract {
     // ====================================
 
     /// @notice Request validation from a validator (ERC-8004)
-    function validationRequest(address validatorAddress, uint256 agentId, string calldata requestUri, bytes32 requestHash)
-        external
-    {
+    function validationRequest(
+        address validatorAddress,
+        uint256 agentId,
+        string calldata requestUri,
+        bytes32 requestHash
+    ) external {
         // For JuryContract, we create a task instead of direct validation request
         bytes32 taskHash = requestHash != bytes32(0)
             ? requestHash
@@ -365,7 +370,12 @@ contract JuryContract is IJuryContract {
     }
 
     /// @notice Get validation summary for agent (ERC-8004)
-    function getSummary(uint256 agentId, address[] calldata, /* validatorAddresses */ bytes32 /* tag */ )
+    function getSummary(
+        uint256 agentId,
+        address[] calldata,
+        /* validatorAddresses */
+        bytes32 /* tag */
+    )
         external
         view
         returns (uint64 count, uint8 avgResponse)

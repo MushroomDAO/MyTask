@@ -6,20 +6,20 @@
 
 ## 四个项目的核心贡献
 
-### 1. Payload Exchange - 支付灵活性与赞助商模式
+### 1. Payload Exchange - 支付灵活性与社区代付模式
 
 **核心问题**: 如何让用户无需持有多种币种就能支付?
 
-**解决方案**: x402 代理拦截 + 赞助商匹配
+**解决方案**: x402 代理拦截 + 社区匹配
 
 ```
 用户支付选项:
 ├─ 选项 A: USDC 直接支付 (传统)
-├─ 选项 B: 关注 Twitter 账号 (赞助商代付)
-└─ 选项 C: 提供验证数据 (赞助商代付)
+├─ 选项 B: 关注 Twitter 账号 (社区代付)
+└─ 选项 C: 提供验证数据 (社区代付)
 
 MyTask 应用:
-├─ Sponsor 可以提供赞助 (代理费用)
+├─ Community 可以提供赞助 (代理费用)
 ├─ Taskor 可以选择支付方式
 ├─ Supplier 灵活定价与促销
 └─ Jury 参与激励多元化
@@ -47,7 +47,7 @@ MyTask 应用:
 └─ Summarizer: 性能分析
 
 MyTask 应用:
-├─ Sponsor Agent: 成本优化
+├─ Community Agent: 成本优化
 ├─ Taskor Agent: 收入优化
 ├─ Supplier Agent: 价格优化
 └─ Jury Agent: 奖励与仲裁优化
@@ -77,7 +77,7 @@ PayBot 流程:
 
 MyTask 应用:
 所有四个角色都无需持有 ETH:
-├─ Sponsor: 签署任务创建 (无 Gas)
+├─ Community: 签署任务创建 (无 Gas)
 ├─ Taskor: 签署任务接受 (无 Gas)
 ├─ Supplier: 签署资源提交 (无 Gas)
 └─ Jury: 签署仲裁决议 (无 Gas)
@@ -122,7 +122,7 @@ MyTask 增强:
 ```
 ┌─────────────────────────────────────────────────────┐
 │ Layer 1: 用户层                                      │
-│ • Sponsor (任务赞助) • Taskor (任务执行)           │
+│ • Community (任务发布/出资) • Taskor (任务执行)     │
 │ • Supplier (资源供) • Jury (审计验证)               │
 │ • 均无需 Gas (PayBot 模式)                          │
 │ • 支付选项多元 (Payload Exchange 模式)              │
@@ -212,7 +212,7 @@ MyTask 增强:
 
 ```
 任务:
-□ 实现任务级支付 (Sponsor → Task)
+□ 实现任务级支付 (Community → Task)
 □ 实现资源供应支付 (Supplier → Resource)
 □ 支付托管与分配逻辑
 □ 支付生命周期管理 (PENDING→CLAIMED→REFUNDED)
@@ -226,7 +226,7 @@ MyTask 增强:
 代码示例:
 // 任务支付
 await createTaskPayment({
-  sponsor: "0x...",
+  community: "0x...",
   amount: "100 USDC",
   duration: "7 days",
   taskTerms: {...}
@@ -250,14 +250,14 @@ await createTaskPayment({
 □ 构建决策可视化与监控
 
 交付物:
-✓ Sponsor Agent - 成本优化
+✓ Community Agent - 成本优化
 ✓ Taskor Agent - 收入优化
 ✓ Supplier Agent - 价格优化
 ✓ Jury Agent - 仲裁优化
 ✓ 决策可视化面板
 
 代码示例:
-// Sponsor Agent
+// Community Agent
 graph = StateGraph()
   .add_node("market_analysis", analyze_market)
   .add_node("risk_assessment", assess_risk)
@@ -284,10 +284,10 @@ graph = StateGraph()
 ✓ 跨链支持
 
 支付选项:
-Sponsor 支付任务可选:
+Community 支付任务可选:
 ├─ 选项 A: 100 USDC 直接支付
-├─ 选项 B: 赞助商代付 + 关注推特
-└─ 选项 C: 赞助商代付 + 数据共享
+├─ 选项 B: 社区代付 + 关注推特
+└─ 选项 C: 社区代付 + 数据共享
 ```
 
 ---
@@ -306,7 +306,7 @@ import { PaymentFacilitator } from "./facilitator"
 export const createPaymentMiddleware = (config: {
   facilitatorUrl: string
   paymentType: "task" | "resource" | "audit"  // MyTask 概念
-  roleRequired: "sponsor" | "taskor" | "supplier" | "jury"
+  roleRequired: "community" | "taskor" | "supplier" | "jury"
   amountRequired: bigint
   supportedPaymentMethods: Array<"usdc" | "social" | "data">  // Payload Exchange
 }) => {
@@ -382,12 +382,12 @@ app.get(
 ### 2. AI 决策代理 (融合 Hubble)
 
 ```typescript
-// apps/backend/agents/sponsor-agent.ts
+// apps/backend/agents/community-agent.ts
 
 import { StateGraph, START, END } from "@langgraph/core"
 import { ChatOpenAI } from "@langchain/openai"
 
-interface SponsorState {
+interface CommunityState {
   taskMarket: TaskMarketData
   budgetConstraints: BudgetConstraints
   riskAssessment: RiskMetrics
@@ -396,11 +396,11 @@ interface SponsorState {
   reasoning: string
 }
 
-export class SponsorAgent {
+export class CommunityAgent {
   private graph: StateGraph
 
   constructor() {
-    this.graph = new StateGraph<SponsorState>()
+    this.graph = new StateGraph<CommunityState>()
       // 节点 1: 市场分析 (从 Hubble)
       .addNode("analyze_market", async (state) => {
         const market = await this.analyzeTaskMarket(state.taskMarket)
@@ -538,7 +538,7 @@ contract MyTaskEscrow is Ownable {
 
     struct Payment {
         uint256 id;
-        address sponsor;
+        address community;
         address taskor;
         address supplier;
         uint256 amount;
@@ -557,7 +557,7 @@ contract MyTaskEscrow is Ownable {
 
     // 无气费支付 (PayBot 模式)
     function createPaymentWithPermit(
-        address sponsor,
+        address community,
         address taskor,
         address supplier,
         uint256 amount,
@@ -567,16 +567,16 @@ contract MyTaskEscrow is Ownable {
         bytes32 permitS
     ) external {
         // 使用 EIP-2612 permit
-        token.permit(sponsor, address(this), amount, deadline, permitV, permitR, permitS);
+        token.permit(community, address(this), amount, deadline, permitV, permitR, permitS);
 
         // 转移代币到托管
-        token.transferFrom(sponsor, address(this), amount);
+        token.transferFrom(community, address(this), amount);
 
         // 创建支付记录
         uint256 paymentId = paymentCounter++;
         payments[paymentId] = Payment({
             id: paymentId,
-            sponsor: sponsor,
+            community: community,
             taskor: taskor,
             supplier: supplier,
             amount: amount,
@@ -617,7 +617,7 @@ contract MyTaskEscrow is Ownable {
         require(block.timestamp > payment.expiresAt, "Not expired");
         require(payment.state == PaymentState.PENDING, "Not pending");
 
-        token.transfer(payment.sponsor, payment.amount);
+        token.transfer(payment.community, payment.amount);
         payment.state = PaymentState.REFUNDED;
     }
 }
@@ -729,7 +729,7 @@ bun run db:migrate
 | 文档 | 焦点 | 长度 |
 |------|------|------|
 | **CLAUDE.md** | 项目指导与架构 | 2KB |
-| **PayloadExchange-Analysis.md** | 支付代理与赞助商 | 10KB |
+| **PayloadExchange-Analysis.md** | 支付代理与社区代付 | 10KB |
 | **HubbleAITrading-Integration-Solution.md** | 多代理系统 | 25KB |
 | **INTEGRATION-QUICK-START.md** | 快速参考 | 10KB |
 | **ARCHITECTURE-DECISION-RECORDS.md** | 10 个关键决策 | 11KB |
@@ -846,4 +846,3 @@ A: 通过 Jury 仲裁。支付在纠纷期间被冻结，Jury 决议后分配。
 **版本**: 1.0
 **维护者**: MyTask Development Team
 **最后更新**: 2025-11-26
-

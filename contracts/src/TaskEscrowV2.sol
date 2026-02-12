@@ -33,9 +33,9 @@ contract TaskEscrowV2 {
     // ====================================
 
     uint256 public constant BASIS_POINTS = 10000;
-    uint256 public constant DEFAULT_TASKOR_SHARE = 7000;   // 70%
+    uint256 public constant DEFAULT_TASKOR_SHARE = 7000; // 70%
     uint256 public constant DEFAULT_SUPPLIER_SHARE = 2000; // 20%
-    uint256 public constant DEFAULT_JURY_SHARE = 1000;     // 10%
+    uint256 public constant DEFAULT_JURY_SHARE = 1000; // 10%
     uint256 public constant DEFAULT_CHALLENGE_PERIOD = 3 days;
     uint256 public constant MIN_CHALLENGE_STAKE = 0.01 ether;
 
@@ -43,27 +43,25 @@ contract TaskEscrowV2 {
     bytes32 public immutable DOMAIN_SEPARATOR;
 
     // EIP-712 TypeHashes
-    bytes32 public constant ACCEPT_TASK_TYPEHASH = keccak256(
-        "AcceptTask(bytes32 taskId,address taskor,uint256 nonce,uint256 deadline)"
-    );
+    bytes32 public constant ACCEPT_TASK_TYPEHASH =
+        keccak256("AcceptTask(bytes32 taskId,address taskor,uint256 nonce,uint256 deadline)");
 
-    bytes32 public constant SUBMIT_WORK_TYPEHASH = keccak256(
-        "SubmitWork(bytes32 taskId,string evidenceUri,uint256 nonce,uint256 deadline)"
-    );
+    bytes32 public constant SUBMIT_WORK_TYPEHASH =
+        keccak256("SubmitWork(bytes32 taskId,string evidenceUri,uint256 nonce,uint256 deadline)");
 
     // ====================================
     // Enums (Enhanced from PointsRecord)
     // ====================================
 
     enum TaskStatus {
-        Open,           // Task created, awaiting taskor
-        Accepted,       // Taskor accepted
-        InProgress,     // Work in progress
-        Submitted,      // Work submitted, in challenge period
-        Challenged,     // Sponsor challenged, awaiting jury
-        Finalized,      // Completed and paid
-        Refunded,       // Cancelled or expired
-        Disputed        // Under jury arbitration
+        Open, // Task created, awaiting taskor
+        Accepted, // Taskor accepted
+        InProgress, // Work in progress
+        Submitted, // Work submitted, in challenge period
+        Challenged, // Community challenged, awaiting jury
+        Finalized, // Completed and paid
+        Refunded, // Cancelled or expired
+        Disputed // Under jury arbitration
     }
 
     // ====================================
@@ -72,7 +70,7 @@ contract TaskEscrowV2 {
 
     struct Task {
         bytes32 taskId;
-        address sponsor;
+        address community;
         address taskor;
         address supplier;
         address token;
@@ -80,8 +78,8 @@ contract TaskEscrowV2 {
         uint256 supplierFee;
         uint256 deadline;
         uint256 createdAt;
-        uint256 challengeDeadline;      // NEW: When challenge period ends
-        uint256 challengeStake;         // NEW: Stake locked for challenge
+        uint256 challengeDeadline; // NEW: When challenge period ends
+        uint256 challengeStake; // NEW: Stake locked for challenge
         TaskStatus status;
         string metadataUri;
         string evidenceUri;
@@ -100,7 +98,7 @@ contract TaskEscrowV2 {
     // ====================================
 
     error InvalidTaskState();
-    error NotSponsor();
+    error NotCommunity();
     error NotTaskor();
     error NotParticipant();
     error TaskExpired();
@@ -134,7 +132,7 @@ contract TaskEscrowV2 {
 
     // Task storage
     mapping(bytes32 => Task) private _tasks;
-    mapping(address => bytes32[]) private _sponsorTasks;
+    mapping(address => bytes32[]) private _communityTasks;
     mapping(address => bytes32[]) private _taskorTasks;
     mapping(address => bytes32[]) private _supplierTasks;
 
@@ -145,14 +143,14 @@ contract TaskEscrowV2 {
     // Events
     // ====================================
 
-    event TaskCreated(bytes32 indexed taskId, address indexed sponsor, address token, uint256 reward);
+    event TaskCreated(bytes32 indexed taskId, address indexed community, address token, uint256 reward);
     event TaskAccepted(bytes32 indexed taskId, address indexed taskor);
     event TaskAcceptedWithSignature(bytes32 indexed taskId, address indexed taskor, address indexed relayer);
     event SupplierAssigned(bytes32 indexed taskId, address indexed supplier, uint256 fee);
     event WorkSubmitted(bytes32 indexed taskId, string evidenceUri, uint256 challengeDeadline);
     event TaskChallenged(bytes32 indexed taskId, address indexed challenger, uint256 stake);
     event TaskFinalized(bytes32 indexed taskId, uint256 taskorPayout, uint256 supplierPayout, uint256 juryPayout);
-    event TaskAutoFinalized(bytes32 indexed taskId);  // NEW: From PointsRecord
+    event TaskAutoFinalized(bytes32 indexed taskId); // NEW: From PointsRecord
     event ChallengeResolved(bytes32 indexed taskId, bool challengeAccepted);
     event TaskCancelled(bytes32 indexed taskId, uint256 refundAmount);
 
@@ -172,8 +170,8 @@ contract TaskEscrowV2 {
         _;
     }
 
-    modifier onlySponsor(bytes32 taskId) {
-        if (_tasks[taskId].sponsor != msg.sender) revert NotSponsor();
+    modifier onlyCommunity(bytes32 taskId) {
+        if (_tasks[taskId].community != msg.sender) revert NotCommunity();
         _;
     }
 
@@ -194,9 +192,7 @@ contract TaskEscrowV2 {
         challengePeriod = DEFAULT_CHALLENGE_PERIOD;
 
         _distributionShares = DistributionShares({
-            taskorShare: DEFAULT_TASKOR_SHARE,
-            supplierShare: DEFAULT_SUPPLIER_SHARE,
-            juryShare: DEFAULT_JURY_SHARE
+            taskorShare: DEFAULT_TASKOR_SHARE, supplierShare: DEFAULT_SUPPLIER_SHARE, juryShare: DEFAULT_JURY_SHARE
         });
 
         // EIP-712 Domain Separator (from PayBot)
@@ -215,13 +211,10 @@ contract TaskEscrowV2 {
     // Task Creation
     // ====================================
 
-    function createTask(
-        address token,
-        uint256 reward,
-        uint256 deadline,
-        string calldata metadataUri,
-        bytes32 taskType
-    ) external returns (bytes32 taskId) {
+    function createTask(address token, uint256 reward, uint256 deadline, string calldata metadataUri, bytes32 taskType)
+        external
+        returns (bytes32 taskId)
+    {
         if (reward == 0) revert ZeroAmount();
         if (deadline <= block.timestamp) revert InvalidDeadline();
 
@@ -235,7 +228,7 @@ contract TaskEscrowV2 {
 
         _tasks[taskId] = Task({
             taskId: taskId,
-            sponsor: msg.sender,
+            community: msg.sender,
             taskor: address(0),
             supplier: address(0),
             token: token,
@@ -252,13 +245,13 @@ contract TaskEscrowV2 {
             juryTaskHash: bytes32(0)
         });
 
-        _sponsorTasks[msg.sender].push(taskId);
+        _communityTasks[msg.sender].push(taskId);
 
         emit TaskCreated(taskId, msg.sender, token, reward);
     }
 
     /**
-     * @notice Create task with EIP-2612 permit (gasless for sponsor)
+     * @notice Create task with EIP-2612 permit (gasless for community)
      * @dev From PayBot pattern - single transaction token approval + escrow
      */
     function createTaskWithPermit(
@@ -288,7 +281,7 @@ contract TaskEscrowV2 {
 
         _tasks[taskId] = Task({
             taskId: taskId,
-            sponsor: msg.sender,
+            community: msg.sender,
             taskor: address(0),
             supplier: address(0),
             token: token,
@@ -305,7 +298,7 @@ contract TaskEscrowV2 {
             juryTaskHash: bytes32(0)
         });
 
-        _sponsorTasks[msg.sender].push(taskId);
+        _communityTasks[msg.sender].push(taskId);
 
         emit TaskCreated(taskId, msg.sender, token, reward);
     }
@@ -330,22 +323,16 @@ contract TaskEscrowV2 {
      * @notice Accept task with EIP-712 signature (gasless for taskor)
      * @dev Relayer pays gas, taskor just signs. From PayBot pattern.
      */
-    function acceptTaskWithSignature(
-        bytes32 taskId,
-        address taskor,
-        uint256 deadline,
-        uint8 v,
-        bytes32 r,
-        bytes32 s
-    ) external onlyTaskStatus(taskId, TaskStatus.Open) {
+    function acceptTaskWithSignature(bytes32 taskId, address taskor, uint256 deadline, uint8 v, bytes32 r, bytes32 s)
+        external
+        onlyTaskStatus(taskId, TaskStatus.Open)
+    {
         Task storage task = _tasks[taskId];
         if (block.timestamp >= task.deadline) revert TaskExpired();
         if (block.timestamp > deadline) revert SignatureExpired();
 
         // Verify signature
-        bytes32 structHash = keccak256(
-            abi.encode(ACCEPT_TASK_TYPEHASH, taskId, taskor, nonces[taskor], deadline)
-        );
+        bytes32 structHash = keccak256(abi.encode(ACCEPT_TASK_TYPEHASH, taskId, taskor, nonces[taskor], deadline));
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
         address signer = ecrecover(digest, v, r, s);
 
@@ -403,10 +390,10 @@ contract TaskEscrowV2 {
     }
 
     /**
-     * @notice Challenge submitted work (sponsor only)
+     * @notice Challenge submitted work (community only)
      * @dev From PointsRecord - requires stake to prevent abuse
      */
-    function challengeWork(bytes32 taskId) external payable onlySponsor(taskId) {
+    function challengeWork(bytes32 taskId) external payable onlyCommunity(taskId) {
         Task storage task = _tasks[taskId];
         if (task.status != TaskStatus.Submitted) revert InvalidTaskState();
         if (block.timestamp > task.challengeDeadline) revert ChallengePeriodExpired();
@@ -436,9 +423,9 @@ contract TaskEscrowV2 {
     }
 
     /**
-     * @notice Sponsor approves work early (skip challenge period)
+     * @notice Community approves work early (skip challenge period)
      */
-    function approveWork(bytes32 taskId) external nonReentrant onlySponsor(taskId) {
+    function approveWork(bytes32 taskId) external nonReentrant onlyCommunity(taskId) {
         Task storage task = _tasks[taskId];
         if (task.status != TaskStatus.Submitted) revert InvalidTaskState();
 
@@ -473,8 +460,8 @@ contract TaskEscrowV2 {
 
             emit ChallengeResolved(taskId, false);
         } else {
-            // Jury rejected - refund sponsor, slash challenger stake
-            _refundSponsor(taskId);
+            // Jury rejected - refund community, slash challenger stake
+            _refundCommunity(taskId);
             task.status = TaskStatus.Refunded;
 
             // Challenger stake goes to taskor as compensation
@@ -490,24 +477,24 @@ contract TaskEscrowV2 {
     // Cancellation & Refunds
     // ====================================
 
-    function cancelTask(bytes32 taskId) external nonReentrant onlySponsor(taskId) {
+    function cancelTask(bytes32 taskId) external nonReentrant onlyCommunity(taskId) {
         Task storage task = _tasks[taskId];
         if (task.status != TaskStatus.Open) revert InvalidTaskState();
 
-        _refundSponsor(taskId);
+        _refundCommunity(taskId);
         task.status = TaskStatus.Refunded;
 
         emit TaskCancelled(taskId, task.reward);
     }
 
-    function claimExpiredRefund(bytes32 taskId) external nonReentrant onlySponsor(taskId) {
+    function claimExpiredRefund(bytes32 taskId) external nonReentrant onlyCommunity(taskId) {
         Task storage task = _tasks[taskId];
         if (block.timestamp <= task.deadline) revert TaskExpired();
         if (task.status != TaskStatus.Open && task.status != TaskStatus.Accepted) {
             revert InvalidTaskState();
         }
 
-        _refundSponsor(taskId);
+        _refundCommunity(taskId);
         task.status = TaskStatus.Refunded;
 
         emit TaskCancelled(taskId, task.reward);
@@ -549,9 +536,9 @@ contract TaskEscrowV2 {
         emit TaskFinalized(taskId, taskorPayout, supplierPayout, juryPayout);
     }
 
-    function _refundSponsor(bytes32 taskId) internal {
+    function _refundCommunity(bytes32 taskId) internal {
         Task storage task = _tasks[taskId];
-        if (!IERC20(task.token).transfer(task.sponsor, task.reward)) {
+        if (!IERC20(task.token).transfer(task.community, task.reward)) {
             revert TransferFailed();
         }
     }
@@ -564,8 +551,8 @@ contract TaskEscrowV2 {
         return _tasks[taskId];
     }
 
-    function getTasksBySponsor(address sponsor) external view returns (bytes32[] memory) {
-        return _sponsorTasks[sponsor];
+    function getTasksByCommunity(address community) external view returns (bytes32[] memory) {
+        return _communityTasks[community];
     }
 
     function getTasksByTaskor(address taskor) external view returns (bytes32[] memory) {
@@ -595,13 +582,6 @@ contract TaskEscrowV2 {
  * @notice ERC-20 Permit interface (EIP-2612)
  */
 interface IERC20Permit {
-    function permit(
-        address owner,
-        address spender,
-        uint256 value,
-        uint256 deadline,
-        uint8 v,
-        bytes32 r,
-        bytes32 s
-    ) external;
+    function permit(address owner, address spender, uint256 value, uint256 deadline, uint8 v, bytes32 r, bytes32 s)
+        external;
 }

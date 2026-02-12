@@ -12,7 +12,7 @@ contract TaskEscrowV2Test is Test {
     ERC20Mock public token;
     ERC20Mock public stakingToken;
 
-    address public sponsor = address(0x1);
+    address public community = address(0x1);
     address public taskor = address(0x2);
     address public supplier = address(0x3);
     address public relayer = address(0x4);
@@ -41,10 +41,10 @@ contract TaskEscrowV2Test is Test {
         escrow = new TaskEscrowV2(address(jury), feeRecipient);
 
         // Setup accounts
-        token.mint(sponsor, 10000 ether);
+        token.mint(community, 10000 ether);
 
         // Approve tokens
-        vm.prank(sponsor);
+        vm.prank(community);
         token.approve(address(escrow), type(uint256).max);
     }
 
@@ -57,20 +57,20 @@ contract TaskEscrowV2Test is Test {
 
         TaskEscrowV2.Task memory task = escrow.getTask(taskId);
 
-        assertEq(task.sponsor, sponsor);
+        assertEq(task.community, community);
         assertEq(task.reward, REWARD);
         assertEq(uint256(task.status), uint256(TaskEscrowV2.TaskStatus.Open));
         assertEq(token.balanceOf(address(escrow)), REWARD);
     }
 
     function test_CreateTask_RevertZeroReward() public {
-        vm.prank(sponsor);
+        vm.prank(community);
         vm.expectRevert(TaskEscrowV2.ZeroAmount.selector);
         escrow.createTask(address(token), 0, block.timestamp + 7 days, "ipfs://meta", bytes32("SIMPLE"));
     }
 
     function test_CreateTask_RevertInvalidDeadline() public {
-        vm.prank(sponsor);
+        vm.prank(community);
         vm.expectRevert(TaskEscrowV2.InvalidDeadline.selector);
         escrow.createTask(address(token), REWARD, block.timestamp - 1, "ipfs://meta", bytes32("SIMPLE"));
     }
@@ -111,18 +111,8 @@ contract TaskEscrowV2Test is Test {
         uint256 nonce = escrow.nonces(taskorSigner);
 
         // Create EIP-712 signature
-        bytes32 structHash = keccak256(
-            abi.encode(
-                escrow.ACCEPT_TASK_TYPEHASH(),
-                taskId,
-                taskorSigner,
-                nonce,
-                deadline
-            )
-        );
-        bytes32 digest = keccak256(
-            abi.encodePacked("\x19\x01", escrow.DOMAIN_SEPARATOR(), structHash)
-        );
+        bytes32 structHash = keccak256(abi.encode(escrow.ACCEPT_TASK_TYPEHASH(), taskId, taskorSigner, nonce, deadline));
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", escrow.DOMAIN_SEPARATOR(), structHash));
 
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(taskorPrivateKey, digest);
 
@@ -154,12 +144,8 @@ contract TaskEscrowV2Test is Test {
         uint256 deadline = block.timestamp - 1; // Already expired
         uint256 nonce = escrow.nonces(taskorSigner);
 
-        bytes32 structHash = keccak256(
-            abi.encode(escrow.ACCEPT_TASK_TYPEHASH(), taskId, taskorSigner, nonce, deadline)
-        );
-        bytes32 digest = keccak256(
-            abi.encodePacked("\x19\x01", escrow.DOMAIN_SEPARATOR(), structHash)
-        );
+        bytes32 structHash = keccak256(abi.encode(escrow.ACCEPT_TASK_TYPEHASH(), taskId, taskorSigner, nonce, deadline));
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", escrow.DOMAIN_SEPARATOR(), structHash));
 
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(taskorPrivateKey, digest);
 
@@ -196,9 +182,9 @@ contract TaskEscrowV2Test is Test {
         vm.prank(taskor);
         escrow.submitWork(taskId, "ipfs://evidence");
 
-        // Sponsor challenges
-        vm.deal(sponsor, 1 ether);
-        vm.prank(sponsor);
+        // Community challenges
+        vm.deal(community, 1 ether);
+        vm.prank(community);
         escrow.challengeWork{value: 0.01 ether}(taskId);
 
         TaskEscrowV2.Task memory task = escrow.getTask(taskId);
@@ -215,8 +201,8 @@ contract TaskEscrowV2Test is Test {
         vm.prank(taskor);
         escrow.submitWork(taskId, "ipfs://evidence");
 
-        vm.deal(sponsor, 1 ether);
-        vm.prank(sponsor);
+        vm.deal(community, 1 ether);
+        vm.prank(community);
         vm.expectRevert(TaskEscrowV2.InsufficientChallengeStake.selector);
         escrow.challengeWork{value: 0.001 ether}(taskId); // Below minimum
     }
@@ -233,8 +219,8 @@ contract TaskEscrowV2Test is Test {
         // Fast forward past challenge period
         vm.warp(block.timestamp + 4 days);
 
-        vm.deal(sponsor, 1 ether);
-        vm.prank(sponsor);
+        vm.deal(community, 1 ether);
+        vm.prank(community);
         vm.expectRevert(TaskEscrowV2.ChallengePeriodExpired.selector);
         escrow.challengeWork{value: 0.01 ether}(taskId);
     }
@@ -300,8 +286,8 @@ contract TaskEscrowV2Test is Test {
 
         uint256 taskorBalanceBefore = token.balanceOf(taskor);
 
-        // Sponsor approves early
-        vm.prank(sponsor);
+        // Community approves early
+        vm.prank(community);
         escrow.approveWork(taskId);
 
         TaskEscrowV2.Task memory task = escrow.getTask(taskId);
@@ -359,14 +345,14 @@ contract TaskEscrowV2Test is Test {
     function test_CancelTask() public {
         bytes32 taskId = _createTask();
 
-        uint256 balanceBefore = token.balanceOf(sponsor);
+        uint256 balanceBefore = token.balanceOf(community);
 
-        vm.prank(sponsor);
+        vm.prank(community);
         escrow.cancelTask(taskId);
 
         TaskEscrowV2.Task memory task = escrow.getTask(taskId);
         assertEq(uint256(task.status), uint256(TaskEscrowV2.TaskStatus.Refunded));
-        assertEq(token.balanceOf(sponsor), balanceBefore + REWARD);
+        assertEq(token.balanceOf(community), balanceBefore + REWARD);
     }
 
     function test_CancelTask_RevertAfterAcceptance() public {
@@ -375,7 +361,7 @@ contract TaskEscrowV2Test is Test {
         vm.prank(taskor);
         escrow.acceptTask(taskId);
 
-        vm.prank(sponsor);
+        vm.prank(community);
         vm.expectRevert(TaskEscrowV2.InvalidTaskState.selector);
         escrow.cancelTask(taskId);
     }
@@ -401,13 +387,10 @@ contract TaskEscrowV2Test is Test {
     // ====================================
 
     function _createTask() internal returns (bytes32) {
-        vm.prank(sponsor);
-        return escrow.createTask(
-            address(token),
-            REWARD,
-            block.timestamp + 7 days,
-            "ipfs://task-metadata",
-            bytes32("SIMPLE")
-        );
+        vm.prank(community);
+        return
+            escrow.createTask(
+                address(token), REWARD, block.timestamp + 7 days, "ipfs://task-metadata", bytes32("SIMPLE")
+            );
     }
 }

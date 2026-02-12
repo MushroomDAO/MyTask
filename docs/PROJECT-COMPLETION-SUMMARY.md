@@ -16,7 +16,7 @@ docs/
 │  └─ 项目指导与架构原则
 │
 ├─ PayloadExchange-Analysis.md (10KB)
-│  └─ x402 支付代理 & 赞助商模式分析
+│  └─ x402 支付代理 & 社区代付模式分析
 │
 ├─ HubbleAITrading-Integration-Solution.md (25KB)
 │  └─ 多代理 AI 交易系统与四角色集成
@@ -45,7 +45,7 @@ submodules/
 │  └─ 任务系统参考实现
 │
 ├─ payload-exchange/ (Payload Exchange)
-│  └─ x402 支付代理与赞助商市场
+│  └─ x402 支付代理与社区代付市场
 │
 ├─ hubble-ai-trading/ (HubbleVision)
 │  └─ 多代理 AI 交易平台
@@ -105,7 +105,7 @@ videos/
 ```
 
 **应用到 MyTask**:
-- ✅ 为四个角色创建 AI 代理 (Sponsor, Taskor, Supplier, Jury)
+- ✅ 为四个角色创建 AI 代理 (Community, Taskor, Supplier, Jury)
 - ✅ 自主决策支付、报价、价格、奖励
 - ✅ 实时监控与可视化仪表板
 
@@ -150,17 +150,17 @@ videos/
 ```
 多支付方式:
 ├─ 选项 A: USDC 直接支付 (传统)
-├─ 选项 B: 社媒关注 (赞助商代付)
-└─ 选项 C: 数据共享 (赞助商代付)
+├─ 选项 B: 社媒关注 (社区代付)
+└─ 选项 C: 数据共享 (社区代付)
 
 经济模型:
-• Sponsor 获取用户
+• Community 获取用户
 • 用户获得免费/折扣
 • 资源提供商获得收入
 ```
 
 **应用到 MyTask**:
-- ✅ Sponsor 可以提供赞助 (代理费用)
+- ✅ Community 可以提供赞助 (代理费用)
 - ✅ Taskor 可以灵活支付
 - ✅ Supplier 可以动态定价
 
@@ -361,7 +361,7 @@ ADR-010: 隐私与合规 ✅
 
 **Payload Exchange 教会我们**:
 - 支付灵活性的重要性
-- 赞助商模式如何运作
+- 社区代付模式如何运作
 - x402 协议的强大性
 - 三方关系的经济学
 
@@ -476,7 +476,7 @@ ADR-010: 隐私与合规 ✅
 
 感谢以下项目的启发与借鉴:
 
-- **Payload Exchange** (ETHGlobal) - x402 支付与赞助商模式
+- **Payload Exchange** (ETHGlobal) - x402 支付与社区代付模式
 - **Hubble AI Trading** (HubbleVision) - 多代理 AI 系统
 - **PayBot** (superposition) - 无气费交易与 Facilitator 模式
 - **Halo** (humanlabs-kr) - 去中心化基础设施与离线验证
@@ -493,4 +493,3 @@ ADR-010: 隐私与合规 ✅
 ---
 
 *Real tasks. Real humans. Real rewards. Powered by decentralized infrastructure.*
-

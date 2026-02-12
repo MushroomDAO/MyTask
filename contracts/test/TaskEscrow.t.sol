@@ -14,7 +14,7 @@ contract TaskEscrowTest is Test {
     ERC20Mock public token;
     ERC20Mock public stakingToken;
 
-    address public sponsor = address(0x1);
+    address public community = address(0x1);
     address public taskor = address(0x2);
     address public supplier = address(0x3);
     address public juror1 = address(0x4);
@@ -39,13 +39,13 @@ contract TaskEscrowTest is Test {
         escrow = new TaskEscrow(address(jury), feeRecipient);
 
         // Setup accounts
-        token.mint(sponsor, 10000 ether);
+        token.mint(community, 10000 ether);
         stakingToken.mint(juror1, 1000 ether);
         stakingToken.mint(juror2, 1000 ether);
         stakingToken.mint(juror3, 1000 ether);
 
         // Approve tokens
-        vm.prank(sponsor);
+        vm.prank(community);
         token.approve(address(escrow), type(uint256).max);
 
         vm.prank(juror1);
@@ -73,7 +73,7 @@ contract TaskEscrowTest is Test {
 
         ITaskEscrow.TaskData memory task = escrow.getTask(taskId);
 
-        assertEq(task.sponsor, sponsor);
+        assertEq(task.community, community);
         assertEq(task.reward, REWARD);
         assertEq(uint256(task.state), uint256(ITaskEscrow.TaskState.CREATED));
         assertEq(token.balanceOf(address(escrow)), REWARD);
@@ -89,7 +89,7 @@ contract TaskEscrowTest is Test {
             taskType: bytes32("SIMPLE")
         });
 
-        vm.prank(sponsor);
+        vm.prank(community);
         vm.expectRevert("Reward must be > 0");
         escrow.createTask(params);
     }
@@ -104,7 +104,7 @@ contract TaskEscrowTest is Test {
             taskType: bytes32("SIMPLE")
         });
 
-        vm.prank(sponsor);
+        vm.prank(community);
         vm.expectRevert("Invalid deadline");
         escrow.createTask(params);
     }
@@ -193,14 +193,14 @@ contract TaskEscrowTest is Test {
     function test_CancelTask() public {
         bytes32 taskId = _createTask();
 
-        uint256 balanceBefore = token.balanceOf(sponsor);
+        uint256 balanceBefore = token.balanceOf(community);
 
-        vm.prank(sponsor);
+        vm.prank(community);
         escrow.cancelTask(taskId);
 
         ITaskEscrow.TaskData memory task = escrow.getTask(taskId);
         assertEq(uint256(task.state), uint256(ITaskEscrow.TaskState.CANCELLED));
-        assertEq(token.balanceOf(sponsor), balanceBefore + REWARD);
+        assertEq(token.balanceOf(community), balanceBefore + REWARD);
     }
 
     function test_CancelTask_RevertAfterAcceptance() public {
@@ -209,7 +209,7 @@ contract TaskEscrowTest is Test {
         vm.prank(taskor);
         escrow.acceptTask(taskId);
 
-        vm.prank(sponsor);
+        vm.prank(community);
         vm.expectRevert("Invalid task state");
         escrow.cancelTask(taskId);
     }
@@ -258,11 +258,11 @@ contract TaskEscrowTest is Test {
     // View Functions Tests
     // ====================================
 
-    function test_GetTasksBySponsor() public {
+    function test_GetTasksByCommunity() public {
         bytes32 taskId1 = _createTask();
         bytes32 taskId2 = _createTask();
 
-        bytes32[] memory tasks = escrow.getTasksBySponsor(sponsor);
+        bytes32[] memory tasks = escrow.getTasksByCommunity(community);
 
         assertEq(tasks.length, 2);
         assertEq(tasks[0], taskId1);
@@ -319,14 +319,14 @@ contract TaskEscrowTest is Test {
         // Fast forward past deadline
         vm.warp(block.timestamp + 8 days);
 
-        uint256 balanceBefore = token.balanceOf(sponsor);
+        uint256 balanceBefore = token.balanceOf(community);
 
-        vm.prank(sponsor);
+        vm.prank(community);
         escrow.claimExpiredRefund(taskId);
 
         ITaskEscrow.TaskData memory task = escrow.getTask(taskId);
         assertEq(uint256(task.state), uint256(ITaskEscrow.TaskState.EXPIRED));
-        assertEq(token.balanceOf(sponsor), balanceBefore + REWARD);
+        assertEq(token.balanceOf(community), balanceBefore + REWARD);
     }
 
     // ====================================
@@ -343,7 +343,7 @@ contract TaskEscrowTest is Test {
             taskType: bytes32("SIMPLE")
         });
 
-        vm.prank(sponsor);
+        vm.prank(community);
         return escrow.createTask(params);
     }
 }

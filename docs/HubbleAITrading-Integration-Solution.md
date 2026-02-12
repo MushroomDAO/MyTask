@@ -261,7 +261,7 @@ GET    /api/v1/config                   # 系统配置
 
 ### 目标愿景
 
-为 MyTask 的所有四个角色（Sponsor、Taskor、Supplier、Jury）提供内置的 **AI 交易辅助代理**，帮助他们：
+为 MyTask 的所有四个角色（Community、Taskor、Supplier、Jury）提供内置的 **AI 交易辅助代理**，帮助他们：
 
 1. **优化经济决策** - 基于市场信号的智能报价
 2. **自动化交易** - 参与 DeFi 协议与代币交易
@@ -274,9 +274,9 @@ GET    /api/v1/config                   # 系统配置
 ┌─────────────────────────────────────────────────────────────────┐
 │                    MyTask 四方平台                              │
 ├────────────┬────────────┬──────────────┬────────────────────────┤
-│  Sponsor   │  Taskor    │  Supplier    │  Jury                  │
+│  Community │  Taskor    │  Supplier    │  Jury                  │
 │            │            │              │                        │
-│ • 任务赞助 │ • 任务执行 │ • 资源供给  │ • 审计验证             │
+│ • 任务发布 │ • 任务执行 │ • 资源供给  │ • 审计验证             │
 │ • 成本管理 │ • 收入优化 │ • 价格优化  │ • 奖励分配             │
 └────────────┴────────────┴──────────────┴────────────────────────┘
              ↓      ↓              ↓             ↓
@@ -322,7 +322,7 @@ GET    /api/v1/config                   # 系统配置
 
 ### 分角色集成方案
 
-#### 1. Sponsor (任务赞助商)
+#### 1. Community (任务发布/出资方)
 
 **AI 交易目标**: 优化任务成本
 
@@ -344,7 +344,7 @@ GET    /api/v1/config                   # 系统配置
    └─ 时间窗口优化
 
 4. Trader Agent 执行交易
-   ├─ 任务创建与赞助
+   ├─ 任务创建与出资
    ├─ 代币交换 (如需要)
    └─ 流动性管理
 
@@ -356,7 +356,7 @@ GET    /api/v1/config                   # 系统配置
 
 示例代理工具:
 task_market_analyzer()        # 分析任务费用
-estimate_sponsorship_cost()   # 评估赞助成本
+estimate_sponsorship_cost()   # 评估出资成本
 auto_adjust_budget()          # 自动调整预算
 hedge_fee_volatility()        # 对冲费用波动
 ```
@@ -373,7 +373,7 @@ hedge_fee_volatility()        # 对冲费用波动
    └─ 市场需求信号
 
 2. Risk Manager 评估任务风险
-   ├─ Sponsor 信誉度
+   ├─ Community 信誉度
    ├─ 任务难度
    └─ 交付风险
 
@@ -555,7 +555,7 @@ maintain_reputation()         # 维护信誉评分
 | 概念 | Payload Exchange | Hubble | MyTask 融合 |
 |------|-----------------|--------|----------|
 | **支付拦截** | x402 代理 | x402 数据获取 | x402 任务交换 |
-| **三方关系** | 用户/赞助商/资源 | 代理/市场/资本 | 四方经济模型 |
+| **三方关系** | 用户/社区/资源 | 代理/市场/资本 | 四方经济模型 |
 | **代理执行** | ChatGPT 集成 | 自主交易 | 任务自动化 |
 | **信任层** | ZK 验证 | 风险评分 | 陪审团验证 |
 
@@ -581,7 +581,7 @@ class TaskMarketResearcher:
 class RolePortfolioManager:
     """为四个角色管理资本配置"""
     async def allocate_budget(self, role: str):
-        # Sponsor: 任务预算分配
+        # Community: 任务预算分配
         # Taskor: 时间与技能分配
         # Supplier: 库存与定价分配
         # Jury: 审计工作分配
@@ -621,7 +621,7 @@ class TaskAnalyzer:
 // app/features/{role}-ai-trading/
 
 // 1. 每个角色的 AI 交易仪表板
-app/features/sponsor-trading/        # Sponsor AI 交易模块
+app/features/community-trading/      # Community AI 交易模块
 app/features/taskor-trading/         # Taskor AI 交易模块
 app/features/supplier-trading/       # Supplier AI 交易模块
 app/features/jury-trading/           # Jury AI 交易模块
@@ -657,7 +657,7 @@ llm_providers:
 
 # 每个角色的配置
 roles:
-  sponsor:
+  community:
     enabled: true
     llm_model: "deepseek-chat"
     budget: 10000                    # USDC
@@ -780,4 +780,3 @@ roles:
 **文档生成日期**: 2025-11-26
 **相关视频**: hubble-ai-trading-demo.mp4
 **集成状态**: 规划阶段
-

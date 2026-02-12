@@ -23,13 +23,13 @@ MyTask/
 ## 三个关键参考项目
 
 ### 1. Payload Exchange (支付代理)
-- **功能**: x402 支付拦截与赞助商匹配
+- **功能**: x402 支付拦截与社区匹配
 - **用途**: 任务支付方案设计
 - **关键特性**:
-  - 三方关系 (Sponsor ↔ User ↔ Resource Provider)
+  - 三方关系 (Community ↔ User ↔ Resource Provider)
   - x402 协议集成
   - ZK 验证信任层
-- **学习点**: 支付流程设计与赞助商模型
+- **学习点**: 支付流程设计与社区代付模型
 
 ### 2. Hubble AI Trading (交易平台)
 - **功能**: 多代理 AI 交易系统 + 边缘计算前端
@@ -57,8 +57,8 @@ MyTask/
 ```
 角色              AI 交易目标              关键工具
 ────────────────────────────────────────────────────
-Sponsor           成本优化                 - 任务费用预测
-(任务赞助商)      & 预算管理               - 自动竞价
+Community         成本优化                 - 任务费用预测
+(任务发布/赞助方)  & 预算管理               - 自动竞价
                                           - 代币交换
 
 Taskor            收入优化                 - 任务推荐
@@ -82,7 +82,7 @@ Jury              奖励优化                 - 审计推荐
 
 ```
 ┌─────────────────────────────────────────────────┐
-│ MyTask 四方平台 (Sponsor/Taskor/Supplier/Jury)│
+│ MyTask 四方平台 (Community/Taskor/Supplier/Jury)│
 └──────────────────┬──────────────────────────────┘
                    │
 ┌──────────────────▼──────────────────────────────┐
@@ -286,9 +286,9 @@ pnpm deploy
 
 ## 常见问题
 
-**Q: MyTask 中的 Sponsor 和 Hubble 中的 Sponsor 有什么区别？**
+**Q: MyTask 中的 Community（任务发布/出资方）和 Hubble 中的赞助方有什么区别？**
 
-A: 在 MyTask 中，Sponsor 是任务赞助商（创建任务的人）。在 Hubble 中，Sponsor 是支付代理层中的赞助商。我们可以使用 Hubble 的赞助商逻辑来优化 MyTask 中 Sponsor 的成本决策。
+A: 在 MyTask 中，Community 是任务发布/出资方（合约字段为 community，表示出资创建任务的地址）。在 Hubble 中，赞助方是支付代理层中的角色概念。我们可以使用 Hubble 的赞助方逻辑来优化 MyTask 中 Community 的成本决策。
 
 **Q: 如何为每个角色定制 AI 代理？**
 
