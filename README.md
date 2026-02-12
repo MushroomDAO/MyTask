@@ -80,6 +80,14 @@ flowchart TB
 - **On-Chain Settlement**: Transparent escrow with dispute resolution
 - **Jury Consensus**: Stake-weighted voting for task validation
 
+## Implemented Features (2026-02-12)
+
+- **Single source of truth review doc**: `docs/TotalSolution.md` (milestones M1-M5, code anchors, reproducible evidence)
+- **Registry 4-role configuration (JURY/PUBLISHER/TASKER/SUPPLIER)**: SuperPaymaster `contracts/script/v3/ConfigureMyTaskRoles.s.sol`
+- **Escrow payout fix (no leftover funds)**: when `supplier != 0` but `supplierFee < cap`, unused supplierShare is redistributed (TaskEscrow + TaskEscrowV2)
+- **Items+Actions reward with traceability**: MyShop `RewardAction` emits `RewardIssued(taskId, juryTaskHash, recipient, ...)`
+- **Event-driven gasless agent mock**: aastar-sdk example watches on-chain events and submits gasless userOps (PaymasterClient)
+
 ## Agent Interaction Flow
 
 ```mermaid
@@ -182,6 +190,14 @@ MIT License - Open source and permissionless.
 [![AI Agents](https://img.shields.io/badge/AI-LangGraph-orange.svg)](https://langchain-ai.github.io/langgraph/)
 
 基于 x402 协议的 AI 驱动、无许可任务市场，采用四方经济模型。
+
+## 已实现特性（2026-02-12）
+
+- **单一评审文档**：`docs/TotalSolution.md`（M1-M5、代码锚点、可复现实证）
+- **四角色 Registry 配置**：SuperPaymaster `contracts/script/v3/ConfigureMyTaskRoles.s.sol`（JURY/PUBLISHER/TASKER/SUPPLIER）
+- **Escrow 结算语义修复（无余额残留）**：supplier 已设置但 supplierFee 未打满上限时，未用完 supplierShare 自动再分配（TaskEscrow + TaskEscrowV2）
+- **Items+Actions 奖励强绑定**：MyShop `RewardAction` 事件 `RewardIssued(taskId, juryTaskHash, recipient, ...)`
+- **事件驱动的 Gasless Agent Mock**：aastar-sdk 示例订阅事件并提交 gasless userOp（PaymasterClient）
 
 ## 架构概览
 
