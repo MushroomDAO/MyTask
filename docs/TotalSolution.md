@@ -376,3 +376,11 @@ Agent Mock（HTTP / Webhook 任选一种实现）：
   - [RegistryV3NewFeatures.t.sol](file:///Volumes/UltraDisk/Dev2/aastar/SuperPaymaster/contracts/test/v3/RegistryV3NewFeatures.t.sol)
 
 注：当前运行环境自带 solc 版本为 0.8.28（SuperPaymaster 需要 0.8.33），因此这里无法直接在本环境执行 SuperPaymaster 的 forge build/test；但上述脚本与测试代码可在你们的 SuperPaymaster 标准构建环境中直接验证。
+
+### 9.3 M3：Escrow ↔ JuryContract 闭环（SUBMITTED → VALIDATED → COMPLETED）
+
+- 新增 E2E 单测（覆盖：提交证据、陪审完成、linkJuryValidation、completeTask 分账）：
+  - [TaskEscrowLifecycle.t.sol](file:///Volumes/UltraDisk/Dev2/aastar/MyTask/contracts/test/TaskEscrowLifecycle.t.sol)
+- 可复现命令：
+  - 目录：/Volumes/UltraDisk/Dev2/aastar/MyTask/contracts
+  - 命令：forge fmt && forge test
