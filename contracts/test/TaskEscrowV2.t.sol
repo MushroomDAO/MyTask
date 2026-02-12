@@ -332,8 +332,10 @@ contract TaskEscrowV2Test is Test {
 
         escrow.finalizeTask(taskId);
 
-        // Taskor: 70% = 700
-        assertEq(token.balanceOf(taskor), taskorBalanceBefore + 700 ether);
+        // Supplier share cap: 20% of 1000 = 200
+        // Supplier fee: 150, unused supplier share: 50 -> split 70/30 between taskor and jury
+        // Taskor: 700 + 35 = 735
+        assertEq(token.balanceOf(taskor), taskorBalanceBefore + 735 ether);
         // Supplier: negotiated fee = 150
         assertEq(token.balanceOf(supplier), supplierBalanceBefore + SUPPLIER_FEE);
     }

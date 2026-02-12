@@ -510,11 +510,14 @@ contract TaskEscrowV2 {
 
         uint256 taskorPayout = (reward * _distributionShares.taskorShare) / BASIS_POINTS;
         uint256 juryPayout = (reward * _distributionShares.juryShare) / BASIS_POINTS;
+        uint256 supplierShareCap = (reward * _distributionShares.supplierShare) / BASIS_POINTS;
         uint256 supplierPayout = task.supplier != address(0) ? task.supplierFee : 0;
 
-        // If no supplier, redistribute their share
         if (task.supplier == address(0)) {
-            uint256 unusedShare = (reward * _distributionShares.supplierShare) / BASIS_POINTS;
+            taskorPayout += (supplierShareCap * 7) / 10;
+            juryPayout += (supplierShareCap * 3) / 10;
+        } else if (supplierPayout < supplierShareCap) {
+            uint256 unusedShare = supplierShareCap - supplierPayout;
             taskorPayout += (unusedShare * 7) / 10;
             juryPayout += (unusedShare * 3) / 10;
         }

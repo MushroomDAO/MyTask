@@ -348,14 +348,20 @@ contract TaskEscrow is ITaskEscrow {
         taskorPayout = (reward * _distributionShares.taskorShare) / BASIS_POINTS;
         juryPayout = (reward * _distributionShares.juryShare) / BASIS_POINTS;
 
+        uint256 supplierShareCap = (reward * _distributionShares.supplierShare) / BASIS_POINTS;
+
         // Supplier gets their negotiated fee (up to supplier share)
         if (task.supplier != address(0)) {
             supplierPayout = task.supplierFee;
+            if (supplierPayout < supplierShareCap) {
+                uint256 unusedSupplierShare = supplierShareCap - supplierPayout;
+                taskorPayout += (unusedSupplierShare * 7) / 10;
+                juryPayout += (unusedSupplierShare * 3) / 10;
+            }
         } else {
             // No supplier - split supplier share between taskor and jury
-            uint256 unusedSupplierShare = (reward * _distributionShares.supplierShare) / BASIS_POINTS;
-            taskorPayout += (unusedSupplierShare * 7) / 10; // 70% to taskor
-            juryPayout += (unusedSupplierShare * 3) / 10; // 30% to jury
+            taskorPayout += (supplierShareCap * 7) / 10;
+            juryPayout += (supplierShareCap * 3) / 10;
         }
 
         return (taskorPayout, supplierPayout, juryPayout);

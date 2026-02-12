@@ -187,7 +187,7 @@ flowchart TD
 - “陪审结果”应当最终落到 linkJuryValidation → completeTask 触发分账
 - “陪审激励闭环”中的额外奖励（积分/NFT）不替代 escrow 分账，而是补贴与荣誉系统（由 MyShop items + actions 发放）
 - 关于“Supplier 是否应该拿钱”的结论（基于当前代码）：在 MyTask 的当前实现里，Supplier 被建模为“协作/资源提供方（可选）”，从 Community 出资的 reward 中领取协商费用（supplierFee，上限为 supplierShare）。
-- 重要语义坑（需要定案）：当前实现中，若设置了 supplier 但 supplierFee < supplierShare 上限，会导致 reward 有一部分未被分配（留在 escrow 合约里）。合约侧改造方向：自动把“未用完的 supplierShare”再分配/退回（建议作为 M3/M? 变更项的一部分）：[TaskEscrow.sol:L339-L362](file:///Volumes/UltraDisk/Dev2/aastar/MyTask/contracts/src/TaskEscrow.sol#L339-L362)
+- 供应商费用的未用份额：若设置 supplier 但 supplierFee < supplierShare 上限，未用完的 supplierShare 需要自动再分配（当前实现为按 70/30 分配给 taskor/jury），避免 reward 留在 escrow 内：[TaskEscrow.sol:L339-L365](file:///Volumes/UltraDisk/Dev2/aastar/MyTask/contracts/src/TaskEscrow.sol#L339-L365)
 
 ### 5.5 流程 E：陪审激励闭环（Supplier=Shop，奖励 Item + Action）
 
@@ -321,8 +321,8 @@ Agent Mock（HTTP / Webhook 任选一种实现）：
 ### M3：陪审员质押注册与 Escrow 结算对接
 
 - 目标：把“陪审资格（质押）→ 陪审任务 → 结果回写 → escrow 分账”跑通
-- 变更项（建议纳入 M3 或 M3.5）：
-  - 处理“supplier 已设置但 supplierFee 未打满上限”的未分配余额语义：合约侧自动把未用完的 supplierShare 再分配/退回
+- 变更项（已落地）：
+  - 处理“supplier 已设置但 supplierFee 未打满上限”的未分配余额语义：合约侧自动把未用完的 supplierShare 再分配（按 70/30 分配给 taskor/jury）
 - 产物：JuryContract 与 TaskEscrow 的对接点约定（juryTaskHash / decision）
 - 验收：
   - 任务从 SUBMITTED → VALIDATED → COMPLETED 可闭环
@@ -349,7 +349,7 @@ Agent Mock（HTTP / Webhook 任选一种实现）：
 - Registry 对自定义角色 roleData 目前只原生处理 uint256 stake（除 ENDUSER/COMMUNITY 外）：若需要更丰富的角色元数据，需扩展 Registry 或改为链外存储 + SBT metadata 绑定。
 - MyShop 的 action 白名单机制（allowedActions）要求平台 owner 预先允许 action 合约：[MyShopItems.sol:L182-L185](file:///Volumes/UltraDisk/Dev2/aastar/MyShop/contracts/src/MyShopItems.sol#L182-L185)
 - TaskEscrow 的分配 shares 是合约级全局参数（feeRecipient 可改），不是“每个 task 单独配置”；每 task 仅能通过 supplierFee 做有限度偏移：[TaskEscrow.sol:L374-L380](file:///Volumes/UltraDisk/Dev2/aastar/MyTask/contracts/src/TaskEscrow.sol#L374-L380)
-- supplier 已设置但 supplierFee 未打满上限会导致余额留在 escrow（需要合约/业务约束定案）：[TaskEscrow.sol:L339-L362](file:///Volumes/UltraDisk/Dev2/aastar/MyTask/contracts/src/TaskEscrow.sol#L339-L362)
+- supplier 已设置但 supplierFee 未打满上限的余额归集规则：当前实现为自动把未用完的 supplierShare 再分配给 taskor/jury（70/30），避免资金残留在 escrow 内：[TaskEscrow.sol:L339-L365](file:///Volumes/UltraDisk/Dev2/aastar/MyTask/contracts/src/TaskEscrow.sol#L339-L365)
 - Gasless 提交流程对 bundler/paymaster 配置依赖较强：需要明确 bundlerUrl、paymasterAddress、operator（SuperPaymaster 模式）等运行时参数来源。
 - Agent Mock 的幂等与重试：需要以链上事件 + nonce（或 taskId 维度状态机）保证“至少一次”执行不会造成重复发奖/重复回写。
 
@@ -376,4 +376,3 @@ Agent Mock（HTTP / Webhook 任选一种实现）：
   - [RegistryV3NewFeatures.t.sol](file:///Volumes/UltraDisk/Dev2/aastar/SuperPaymaster/contracts/test/v3/RegistryV3NewFeatures.t.sol)
 
 注：当前运行环境自带 solc 版本为 0.8.28（SuperPaymaster 需要 0.8.33），因此这里无法直接在本环境执行 SuperPaymaster 的 forge build/test；但上述脚本与测试代码可在你们的 SuperPaymaster 标准构建环境中直接验证。
-

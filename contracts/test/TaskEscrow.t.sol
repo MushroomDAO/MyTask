@@ -229,12 +229,15 @@ contract TaskEscrowTest is Test {
 
         (uint256 taskorPayout, uint256 supplierPayout, uint256 juryPayout) = escrow.calculatePayouts(taskId);
 
-        // Taskor: 70% of 1000 = 700
-        assertEq(taskorPayout, 700 ether);
+        // Supplier share cap: 20% of 1000 = 200
+        // Supplier fee: 150, unused supplier share: 50 -> split 70/30 between taskor and jury
+        // Taskor: 700 + 35 = 735
+        assertEq(taskorPayout, 735 ether);
         // Supplier: negotiated fee = 150
         assertEq(supplierPayout, SUPPLIER_FEE);
-        // Jury: 10% of 1000 = 100
-        assertEq(juryPayout, 100 ether);
+        // Jury: 100 + 15 = 115
+        assertEq(juryPayout, 115 ether);
+        assertEq(taskorPayout + supplierPayout + juryPayout, REWARD);
     }
 
     function test_CalculatePayouts_NoSupplier() public {
