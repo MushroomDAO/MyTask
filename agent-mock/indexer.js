@@ -15,6 +15,21 @@ function randomId() {
   return `${Date.now()}-${process.pid}-${Math.random().toString(16).slice(2)}`;
 }
 
+function stableStringify(v) {
+  if (v === null) return "null";
+  const t = typeof v;
+  if (t === "string") return JSON.stringify(v);
+  if (t === "number") return Number.isFinite(v) ? String(v) : "null";
+  if (t === "boolean") return v ? "true" : "false";
+  if (t === "bigint") return JSON.stringify(v.toString());
+  if (Array.isArray(v)) return `[${v.map((x) => stableStringify(x)).join(",")}]`;
+  if (t === "object") {
+    const keys = Object.keys(v).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(v[k])}`).join(",")}}`;
+  }
+  return "null";
+}
+
 function getArgValue(argv, key) {
   const i = argv.indexOf(key);
   if (i === -1) return undefined;
@@ -679,6 +694,39 @@ async function main() {
     return arr;
   };
 
+  const buildReputationSnapshot = (agentId) => {
+    const agentKey = String(agentId);
+    const agent = finalState.agents[agentKey];
+    if (!agent) return null;
+
+    const validations = [];
+    for (const taskId of Object.keys(finalState.tasks)) {
+      const t = finalState.tasks[taskId];
+      const vals = t?.validations ?? [];
+      for (const v of vals) {
+        if (String(v?.agentId ?? "") !== agentKey) continue;
+        validations.push({ taskId, ...v });
+      }
+    }
+    validations.sort((a, b) => Number(BigInt(b.lastUpdate ?? "0") - BigInt(a.lastUpdate ?? "0")));
+
+    const payload = {
+      schema: "aastar.agentReputation@v1",
+      chainId: String(finalState.meta.chainId),
+      juryContract: finalState.meta.juryContract,
+      generatedAt: finalState.meta.generatedAt,
+      agentId: agentKey,
+      owner: agent.owner ?? null,
+      ownerSource: agent.ownerSource ?? null,
+      byTag: agent.byTag ?? {},
+      byValidator: agent.byValidator ?? {},
+      validations
+    };
+    const canonical = stableStringify(payload);
+    const digest = keccak256(toHex(canonical));
+    return { digest, canonical, reputation: payload };
+  };
+
   const server = nodeHttp.createServer((req, res) => {
     const traceId = req.headers["x-trace-id"] ? String(req.headers["x-trace-id"]) : randomId();
     const u = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
@@ -764,6 +812,30 @@ async function main() {
       return sendJson(res, 200, { ok: true, agents });
     }
 
+    if (req.method === "GET" && p.startsWith("/reputation/")) {
+      const agentId = p.split("/").pop();
+      const snapshot = buildReputationSnapshot(agentId);
+      if (!snapshot) {
+        logEvent({ event: "indexer.http", ok: false, traceId, method: req.method, path: p, code: 404 });
+        return sendJson(res, 404, { error: "not-found" });
+      }
+      logEvent({ event: "indexer.http", ok: true, traceId, method: req.method, path: p, code: 200 });
+      return sendJson(res, 200, { ok: true, ...snapshot });
+    }
+
+    if (req.method === "GET" && p === "/reputation") {
+      const agents = Object.keys(finalState.agents)
+        .sort((a, b) => Number(BigInt(b) - BigInt(a)))
+        .map((agentId) => ({
+          agentId,
+          owner: finalState.agents[agentId]?.owner ?? null,
+          ownerSource: finalState.agents[agentId]?.ownerSource ?? null,
+          href: `/reputation/${agentId}`
+        }));
+      logEvent({ event: "indexer.http", ok: true, traceId, method: req.method, path: p, code: 200 });
+      return sendJson(res, 200, { ok: true, agents });
+    }
+
     if (req.method === "GET" && p === "/") {
       const tasks = listTasks().slice(0, 20);
       const taskLinks = tasks
@@ -785,6 +857,7 @@ async function main() {
       <li><a href="/validations">/validations</a></li>
       <li><a href="/rewards">/rewards</a></li>
       <li><a href="/agents">/agents</a></li>
+      <li><a href="/reputation">/reputation</a></li>
       <li><a href="/alerts">/alerts</a></li>
       <li><a href="/state">/state</a></li>
     </ul>

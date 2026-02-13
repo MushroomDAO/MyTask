@@ -507,7 +507,7 @@ MyTask 的链上流程涉及多角色、多合约、多脚本联动。为了让�
    - 持久化：支持 `--logFile`/`--logMaxBytes`（或 `X402_LOG_FILE`/`X402_LOG_MAX_BYTES`）写入与滚动
 2. **Indexer Dashboard + JSON API**（`agent-mock/indexer.js`）
    - 运行：`node indexer.js --serve true --port 8790`
-   - API: `/tasks`, `/validations`, `/rewards`, `/agents`, `/alerts`, `/state`, `/metrics`
+   - API: `/tasks`, `/validations`, `/rewards`, `/agents`, `/reputation`, `/alerts`, `/state`, `/metrics`
    - 增量：支持 cursor/resume（`--cursorFile`/`--resume`）与 confirmations（`--confirmations`）控制重扫与抗重组
    - Reward 索引：可选 `--rewardAction`（或 `REWARD_ACTION_ADDRESS`）拉取 MyShop action 事件并按 `taskId` 归档
    - 持久化：支持 `--logFile`/`--logMaxBytes`（或 `INDEXER_LOG_FILE`/`INDEXER_LOG_MAX_BYTES`）写入与滚动
