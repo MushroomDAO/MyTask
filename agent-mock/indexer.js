@@ -332,7 +332,12 @@ async function main() {
         { name: "lastUpdate", type: "uint256" }
       ]
     },
-    { type: "function", name: "getValidationReceipts", stateMutability: "view", inputs: [{ type: "bytes32" }], outputs: [{ type: "bytes32[]" }] }
+    { type: "function", name: "getValidationReceipts", stateMutability: "view", inputs: [{ type: "bytes32" }], outputs: [{ type: "bytes32[]" }] },
+    { type: "function", name: "getMySBT", stateMutability: "view", inputs: [], outputs: [{ name: "mysbt", type: "address" }] }
+  ];
+
+  const mySbtAbi = [
+    { type: "function", name: "ownerOf", stateMutability: "view", inputs: [{ type: "uint256" }], outputs: [{ type: "address" }] }
   ];
 
   const state = {
@@ -600,6 +605,19 @@ async function main() {
       byValidator[validator] = { count: v.count, avg: v.count > 0 ? Math.floor(v.total / v.count) : 0 };
     }
   }
+
+  try {
+    const mySbt = await publicClient.readContract({ address: juryContract, abi: juryAbi, functionName: "getMySBT", args: [] });
+    if (mySbt && mySbt !== "0x0000000000000000000000000000000000000000") {
+      for (const agentId of Object.keys(state.agents)) {
+        try {
+          const owner = await publicClient.readContract({ address: mySbt, abi: mySbtAbi, functionName: "ownerOf", args: [BigInt(agentId)] });
+          state.agents[agentId].owner = owner;
+          state.agents[agentId].ownerSource = "MySBT.ownerOf";
+        } catch {}
+      }
+    }
+  } catch {}
 
   const bytes = toHex(JSON.stringify(state, null, 2));
   const digest = keccak256(bytes);

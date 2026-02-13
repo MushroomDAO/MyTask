@@ -74,6 +74,11 @@ function parseBool(v, defaultValue) {
   throw new Error(`Invalid boolean: ${v}`);
 }
 
+function normalizeHexAddress(v) {
+  if (!v) return v;
+  return v.startsWith("0x") ? v : `0x${v}`;
+}
+
 function randomId() {
   return `${Date.now()}-${process.pid}-${Math.random().toString(16).slice(2)}`;
 }
@@ -340,6 +345,9 @@ async function main() {
       "ipfs://validation-response";
     const validationScore = Number(getArgValue(argv, "--validationScore") ?? process.env.VALIDATION_SCORE ?? "80");
     let validationReceiptUri = getArgValue(argv, "--validationReceiptUri") ?? process.env.VALIDATION_RECEIPT_URI;
+
+    const enforceAgentOwner = parseBool(getArgValue(argv, "--enforceAgentOwner") ?? process.env.ENFORCE_AGENT_OWNER, true);
+    const expectedAgentOwnerRaw = getArgValue(argv, "--expectedAgentOwner") ?? process.env.EXPECTED_AGENT_OWNER ?? "taskor";
 
     const x402ProxyUrl = getArgValue(argv, "--x402ProxyUrl") ?? process.env.X402_PROXY_URL;
     const x402Currency = getArgValue(argv, "--x402Currency") ?? process.env.X402_CURRENCY ?? "USD";
@@ -716,6 +724,13 @@ async function main() {
             },
             {
               type: "function",
+              name: "getMySBT",
+              stateMutability: "view",
+              inputs: [],
+              outputs: [{ name: "mysbt", type: "address" }]
+            },
+            {
+              type: "function",
               name: "getValidationStatus",
               stateMutability: "view",
               inputs: [{ name: "requestHash", type: "bytes32" }],
@@ -733,6 +748,16 @@ async function main() {
               stateMutability: "view",
               inputs: [{ name: "juror", type: "address" }],
               outputs: [{ name: "isActive", type: "bool" }, { name: "stake", type: "uint256" }]
+            }
+          ];
+
+          const mySbtAbi = [
+            {
+              type: "function",
+              name: "ownerOf",
+              stateMutability: "view",
+              inputs: [{ name: "tokenId", type: "uint256" }],
+              outputs: [{ name: "owner", type: "address" }]
             }
           ];
 
@@ -764,6 +789,42 @@ async function main() {
           saveState();
 
           if (validationMinCount > 0n) {
+            let taskForOwnerCheck = null;
+            try {
+              taskForOwnerCheck = await publicClient.readContract({ address: taskEscrow, abi: taskEscrowAbi, functionName: "getTask", args: [taskId] });
+            } catch {}
+
+            let expectedAgentOwner = null;
+            if (expectedAgentOwnerRaw === "taskor") expectedAgentOwner = taskForOwnerCheck?.taskor ?? null;
+            else if (expectedAgentOwnerRaw === "community") expectedAgentOwner = taskForOwnerCheck?.community ?? null;
+            else expectedAgentOwner = normalizeHexAddress(expectedAgentOwnerRaw);
+
+            try {
+              const mySbt = await publicClient.readContract({ address: juryContractAddress, abi: juryAbi, functionName: "getMySBT", args: [] });
+              if (mySbt && mySbt !== "0x0000000000000000000000000000000000000000") {
+                const owner = await publicClient.readContract({ address: mySbt, abi: mySbtAbi, functionName: "ownerOf", args: [agentId] });
+                entry.agentOwner = owner;
+                entry.agentOwnerSource = "MySBT.ownerOf";
+                entry.expectedAgentOwner = expectedAgentOwner;
+                saveState();
+                if (enforceAgentOwner && expectedAgentOwner && owner.toLowerCase() !== expectedAgentOwner.toLowerCase()) {
+                  entry.lastError = `agentId owner mismatch: ownerOf(${agentId.toString()})=${owner} expected=${expectedAgentOwner}`;
+                  saveState();
+                  logTaskEvent({
+                    event: "orchestrator.agentOwnerMismatch",
+                    ok: false,
+                    mode,
+                    agentId: agentId.toString(),
+                    agentOwner: owner,
+                    expectedAgentOwner
+                  });
+                  return;
+                }
+              }
+            } catch (e) {
+              logTaskEvent({ event: "orchestrator.agentOwnerLookupFailed", ok: false, mode, error: String(e) });
+            }
+
             const statusTuple = await publicClient.readContract({
               address: juryContractAddress,
               abi: juryAbi,
