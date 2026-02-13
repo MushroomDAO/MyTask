@@ -114,6 +114,7 @@ contract TaskEscrowV2 {
     error ZeroAddress();
     error ZeroAmount();
     error InvalidDeadline();
+    error InvalidReceipt();
 
     // ====================================
     // State Variables
@@ -139,6 +140,9 @@ contract TaskEscrowV2 {
     // Challenge stakes (from PointsRecord pattern)
     mapping(bytes32 => address) private _challengers;
 
+    mapping(bytes32 => bytes32[]) private _taskReceipts;
+    mapping(bytes32 => mapping(bytes32 => bool)) private _taskReceiptAdded;
+
     // ====================================
     // Events
     // ====================================
@@ -153,6 +157,7 @@ contract TaskEscrowV2 {
     event TaskAutoFinalized(bytes32 indexed taskId); // NEW: From PointsRecord
     event ChallengeResolved(bytes32 indexed taskId, bool challengeAccepted);
     event TaskCancelled(bytes32 indexed taskId, uint256 refundAmount);
+    event ReceiptLinked(bytes32 indexed taskId, bytes32 indexed receiptId, string receiptUri, address indexed linker);
 
     // ====================================
     // Modifiers
@@ -500,6 +505,22 @@ contract TaskEscrowV2 {
         emit TaskCancelled(taskId, task.reward);
     }
 
+    function linkReceipt(bytes32 taskId, bytes32 receiptId, string calldata receiptUri) external {
+        Task storage task = _tasks[taskId];
+        if (task.taskId == bytes32(0)) revert InvalidTaskState();
+        if (receiptId == bytes32(0)) revert InvalidReceipt();
+
+        if (msg.sender != task.community && msg.sender != task.taskor && msg.sender != task.supplier) {
+            revert NotParticipant();
+        }
+
+        if (_taskReceiptAdded[taskId][receiptId]) return;
+        _taskReceiptAdded[taskId][receiptId] = true;
+        _taskReceipts[taskId].push(receiptId);
+
+        emit ReceiptLinked(taskId, receiptId, receiptUri, msg.sender);
+    }
+
     // ====================================
     // Internal Functions
     // ====================================
@@ -552,6 +573,10 @@ contract TaskEscrowV2 {
 
     function getTask(bytes32 taskId) external view returns (Task memory) {
         return _tasks[taskId];
+    }
+
+    function getTaskReceipts(bytes32 taskId) external view returns (bytes32[] memory receiptIds) {
+        return _taskReceipts[taskId];
     }
 
     function getTasksByCommunity(address community) external view returns (bytes32[] memory) {

@@ -1,5 +1,12 @@
 #!/usr/bin/env node
-const { createPublicClient, http, encodeFunctionData, concat, pad } = require("viem");
+const {
+  createPublicClient,
+  createWalletClient,
+  http,
+  encodeFunctionData,
+  concat,
+  pad
+} = require("viem");
 const { privateKeyToAccount } = require("viem/accounts");
 const path = require("path");
 require("dotenv").config({ path: path.join(process.cwd(), ".env") });
@@ -81,6 +88,158 @@ async function main() {
         for (const log of logs) {
           const args = log.args ?? {};
           process.stdout.write(JSON.stringify({ mode, address: taskEscrow, log: { ...log, args } }) + "\n");
+          if (once) {
+            unwatch();
+            process.exit(0);
+          }
+        }
+      }
+    });
+
+    return;
+  }
+
+  if (mode === "orchestrateTasks") {
+    const once = parseBool(getArgValue(argv, "--once"), false);
+    const autoAccept = parseBool(getArgValue(argv, "--autoAccept"), true);
+    const autoSubmit = parseBool(getArgValue(argv, "--autoSubmit"), true);
+    const evidenceUri =
+      getArgValue(argv, "--evidenceUri") ??
+      process.env.EVIDENCE_URI ??
+      "ipfs://evidence";
+
+    const privateKeyRaw = getArgValue(argv, "--privateKey") ?? requireEnv("PRIVATE_KEY");
+    const privateKey = privateKeyRaw.startsWith("0x") ? privateKeyRaw : `0x${privateKeyRaw}`;
+    const account = privateKeyToAccount(privateKey);
+
+    const walletClient = createWalletClient({
+      account,
+      chain: {
+        id: chainId,
+        name: "custom",
+        nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },
+        rpcUrls: { default: { http: [rpcUrl] } }
+      },
+      transport: http(rpcUrl)
+    });
+
+    const taskEscrowAbi = [
+      {
+        type: "event",
+        name: "TaskCreated",
+        anonymous: false,
+        inputs: [
+          { indexed: true, name: "taskId", type: "bytes32" },
+          { indexed: true, name: "community", type: "address" },
+          { indexed: false, name: "token", type: "address" },
+          { indexed: false, name: "reward", type: "uint256" }
+        ]
+      },
+      {
+        type: "function",
+        name: "getTask",
+        stateMutability: "view",
+        inputs: [{ name: "taskId", type: "bytes32" }],
+        outputs: [
+          {
+            type: "tuple",
+            components: [
+              { name: "taskId", type: "bytes32" },
+              { name: "community", type: "address" },
+              { name: "taskor", type: "address" },
+              { name: "supplier", type: "address" },
+              { name: "token", type: "address" },
+              { name: "reward", type: "uint256" },
+              { name: "supplierFee", type: "uint256" },
+              { name: "deadline", type: "uint256" },
+              { name: "createdAt", type: "uint256" },
+              { name: "challengeDeadline", type: "uint256" },
+              { name: "challengeStake", type: "uint256" },
+              { name: "status", type: "uint8" },
+              { name: "metadataUri", type: "string" },
+              { name: "evidenceUri", type: "string" },
+              { name: "taskType", type: "bytes32" },
+              { name: "juryTaskHash", type: "bytes32" }
+            ]
+          }
+        ]
+      },
+      {
+        type: "function",
+        name: "acceptTask",
+        stateMutability: "nonpayable",
+        inputs: [{ name: "taskId", type: "bytes32" }],
+        outputs: []
+      },
+      {
+        type: "function",
+        name: "submitWork",
+        stateMutability: "nonpayable",
+        inputs: [
+          { name: "taskId", type: "bytes32" },
+          { name: "evidenceUri", type: "string" }
+        ],
+        outputs: []
+      }
+    ];
+
+    const sendTx = async ({ to, data }) => {
+      if (dryRun) {
+        process.stdout.write(JSON.stringify({ to, data, from: account.address, dryRun: true }) + "\n");
+        return null;
+      }
+      const hash = await walletClient.sendTransaction({ to, data, value: 0n });
+      await publicClient.waitForTransactionReceipt({ hash });
+      return hash;
+    };
+
+    let unwatch = () => {};
+    unwatch = publicClient.watchContractEvent({
+      address: taskEscrow,
+      abi: taskEscrowAbi,
+      eventName: "TaskCreated",
+      onLogs: async (logs) => {
+        for (const log of logs) {
+          const args = log.args ?? {};
+          const taskId = args.taskId;
+          if (!taskId) continue;
+
+          const task = await publicClient.readContract({
+            address: taskEscrow,
+            abi: taskEscrowAbi,
+            functionName: "getTask",
+            args: [taskId]
+          });
+
+          const status = Number(task.status);
+          const shouldAccept = autoAccept && status === 0;
+          const shouldSubmit =
+            autoSubmit &&
+            (status === 1 || status === 2) &&
+            String(task.taskor).toLowerCase() === account.address.toLowerCase();
+
+          if (shouldAccept) {
+            const data = encodeFunctionData({
+              abi: taskEscrowAbi,
+              functionName: "acceptTask",
+              args: [taskId]
+            });
+            const txHash = await sendTx({ to: taskEscrow, data });
+            process.stdout.write(JSON.stringify({ mode, action: "acceptTask", taskId, txHash }) + "\n");
+          }
+
+          if (shouldSubmit) {
+            const data = encodeFunctionData({
+              abi: taskEscrowAbi,
+              functionName: "submitWork",
+              args: [taskId, evidenceUri]
+            });
+            const txHash = await sendTx({ to: taskEscrow, data });
+            process.stdout.write(
+              JSON.stringify({ mode, action: "submitWork", taskId, evidenceUri, txHash }) + "\n"
+            );
+          }
+
           if (once) {
             unwatch();
             process.exit(0);

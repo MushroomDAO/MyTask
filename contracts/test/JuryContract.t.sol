@@ -230,4 +230,104 @@ contract JuryContractTest is Test {
         bytes32[] memory validations = jury.getAgentValidations(AGENT_ID);
         assertEq(validations.length, 3);
     }
+
+    function test_ValidationRequestCreatesTaskAndAssignsToValidator() public {
+        vm.prank(taskCreator);
+        jury.validationRequest(address(jury), AGENT_ID, "ipfs://request", bytes32(0));
+
+        bytes32[] memory requests = jury.getValidatorRequests(address(jury));
+        assertEq(requests.length, 1);
+
+        bytes32 requestHash = requests[0];
+        IJuryContract.Task memory task = jury.getTask(requestHash);
+        assertEq(task.agentId, AGENT_ID);
+        assertEq(task.evidenceUri, "ipfs://request");
+        assertEq(uint8(task.status), uint8(IJuryContract.TaskStatus.PENDING));
+    }
+
+    function test_ValidationRequestRejectsUnsupportedValidator() public {
+        vm.prank(taskCreator);
+        vm.expectRevert("Unsupported validator");
+        jury.validationRequest(address(0xBEEF), AGENT_ID, "ipfs://request", bytes32(0));
+    }
+
+    function test_GetSummaryFiltersByTagAndValidator() public {
+        vm.prank(juror1);
+        jury.registerJuror(MIN_STAKE);
+
+        IJuryContract.TaskParams memory p1 = IJuryContract.TaskParams({
+            agentId: AGENT_ID,
+            taskType: IJuryContract.TaskType.SIMPLE_VERIFICATION,
+            evidenceUri: "ipfs://e1",
+            reward: 0,
+            deadline: block.timestamp + 7 days,
+            minJurors: 1,
+            consensusThreshold: 0
+        });
+        IJuryContract.TaskParams memory p2 = IJuryContract.TaskParams({
+            agentId: AGENT_ID,
+            taskType: IJuryContract.TaskType.CONSENSUS_REQUIRED,
+            evidenceUri: "ipfs://e2",
+            reward: 0,
+            deadline: block.timestamp + 7 days,
+            minJurors: 1,
+            consensusThreshold: 0
+        });
+
+        vm.startPrank(taskCreator);
+        bytes32 h1 = jury.createTask(p1);
+        bytes32 h2 = jury.createTask(p2);
+        jury.submitEvidence(h1, "ipfs://e1");
+        jury.submitEvidence(h2, "ipfs://e2");
+        vm.stopPrank();
+
+        vm.prank(juror1);
+        jury.vote(h1, 80, "");
+        vm.prank(juror1);
+        jury.vote(h2, 100, "");
+
+        jury.finalizeTask(h1);
+        jury.finalizeTask(h2);
+
+        address[] memory validators = new address[](1);
+        validators[0] = address(jury);
+
+        (uint64 countSimple, uint8 avgSimple) = jury.getSummary(
+            AGENT_ID, validators, bytes32(uint256(uint8(IJuryContract.TaskType.SIMPLE_VERIFICATION) + 1))
+        );
+        assertEq(countSimple, 1);
+        assertEq(avgSimple, 80);
+
+        address[] memory wrongValidators = new address[](1);
+        wrongValidators[0] = address(0xBEEF);
+        (uint64 countWrong, uint8 avgWrong) = jury.getSummary(
+            AGENT_ID, wrongValidators, bytes32(uint256(uint8(IJuryContract.TaskType.SIMPLE_VERIFICATION) + 1))
+        );
+        assertEq(countWrong, 0);
+        assertEq(avgWrong, 0);
+    }
+
+    function test_LinkReceiptToValidation() public {
+        vm.prank(taskCreator);
+        bytes32 requestHash = keccak256(abi.encodePacked("request-with-receipt"));
+        jury.validationRequest(address(jury), AGENT_ID, "ipfs://request", requestHash);
+
+        bytes32 receiptId = keccak256("receipt-1");
+
+        vm.prank(taskCreator);
+        jury.linkReceiptToValidation(requestHash, receiptId, "ipfs://receipt-1");
+
+        bytes32[] memory receipts = jury.getValidationReceipts(requestHash);
+        assertEq(receipts.length, 1);
+        assertEq(receipts[0], receiptId);
+
+        vm.prank(taskCreator);
+        jury.linkReceiptToValidation(requestHash, receiptId, "ipfs://receipt-1");
+        receipts = jury.getValidationReceipts(requestHash);
+        assertEq(receipts.length, 1);
+
+        vm.prank(address(0xBEEF));
+        vm.expectRevert("Not task creator");
+        jury.linkReceiptToValidation(requestHash, keccak256("receipt-2"), "ipfs://receipt-2");
+    }
 }

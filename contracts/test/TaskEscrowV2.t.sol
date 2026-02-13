@@ -384,6 +384,32 @@ contract TaskEscrowV2Test is Test {
         assertEq(escrow.getChallengePeriod(), 3 days);
     }
 
+    function test_LinkReceipt_AllowsParticipantsAndDedupes() public {
+        bytes32 taskId = _createTask();
+
+        vm.prank(taskor);
+        escrow.acceptTask(taskId);
+
+        bytes32 receiptId = keccak256("receipt-1");
+
+        vm.prank(taskor);
+        escrow.linkReceipt(taskId, receiptId, "ipfs://receipt-1");
+
+        bytes32[] memory receipts = escrow.getTaskReceipts(taskId);
+        assertEq(receipts.length, 1);
+        assertEq(receipts[0], receiptId);
+
+        vm.prank(taskor);
+        escrow.linkReceipt(taskId, receiptId, "ipfs://receipt-1");
+
+        receipts = escrow.getTaskReceipts(taskId);
+        assertEq(receipts.length, 1);
+
+        vm.prank(address(0xBEEF));
+        vm.expectRevert(TaskEscrowV2.NotParticipant.selector);
+        escrow.linkReceipt(taskId, keccak256("receipt-2"), "ipfs://receipt-2");
+    }
+
     // ====================================
     // Helper Functions
     // ====================================

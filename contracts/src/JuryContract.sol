@@ -38,6 +38,9 @@ contract JuryContract is IJuryContract {
     /// @notice Default consensus threshold (66%)
     uint256 public constant DEFAULT_CONSENSUS = 6600;
 
+    uint256 public constant DEFAULT_REQUEST_DEADLINE_WINDOW = 7 days;
+    uint256 public constant DEFAULT_REQUEST_MIN_JURORS = 3;
+
     /// @notice Task counter for unique IDs
     uint256 private _taskCounter;
 
@@ -78,6 +81,9 @@ contract JuryContract is IJuryContract {
     /// @notice ERC-8004 validation status (requestHash => status)
     mapping(bytes32 => ValidationStatus) private _validationStatuses;
 
+    mapping(bytes32 => bytes32[]) private _validationReceipts;
+    mapping(bytes32 => mapping(bytes32 => bool)) private _validationReceiptAdded;
+
     struct ValidationStatus {
         address validatorAddress;
         uint256 agentId;
@@ -85,6 +91,10 @@ contract JuryContract is IJuryContract {
         bytes32 tag;
         uint256 lastUpdate;
     }
+
+    event ValidationReceiptLinked(
+        bytes32 indexed requestHash, bytes32 indexed receiptId, string receiptUri, address indexed linker
+    );
 
     // ====================================
     // Constructor
@@ -118,27 +128,53 @@ contract JuryContract is IJuryContract {
         _taskCounter++;
         taskHash = keccak256(abi.encode(msg.sender, _taskCounter, block.timestamp, params.agentId));
 
+        _initTask(
+            taskHash,
+            msg.sender,
+            params.agentId,
+            params.taskType,
+            params.evidenceUri,
+            params.reward,
+            params.deadline,
+            params.minJurors,
+            params.consensusThreshold
+        );
+
+        emit TaskCreated(taskHash, params.agentId, params.taskType, params.reward, params.deadline);
+
+        return taskHash;
+    }
+
+    function _initTask(
+        bytes32 taskHash,
+        address creator,
+        uint256 agentId,
+        TaskType taskType,
+        string memory evidenceUri,
+        uint256 reward,
+        uint256 deadline,
+        uint256 minJurors,
+        uint256 consensusThreshold
+    ) internal {
+        require(_tasks[taskHash].taskHash == bytes32(0), "Task exists");
+
         _tasks[taskHash] = Task({
-            agentId: params.agentId,
+            agentId: agentId,
             taskHash: taskHash,
-            evidenceUri: params.evidenceUri,
-            taskType: params.taskType,
-            reward: params.reward,
-            deadline: params.deadline,
+            evidenceUri: evidenceUri,
+            taskType: taskType,
+            reward: reward,
+            deadline: deadline,
             status: TaskStatus.PENDING,
-            minJurors: params.minJurors,
-            consensusThreshold: params.consensusThreshold == 0 ? DEFAULT_CONSENSUS : params.consensusThreshold,
+            minJurors: minJurors,
+            consensusThreshold: consensusThreshold == 0 ? DEFAULT_CONSENSUS : consensusThreshold,
             totalVotes: 0,
             positiveVotes: 0,
             finalResponse: 0
         });
 
-        _taskCreators[taskHash] = msg.sender;
-        _agentValidations[params.agentId].push(taskHash);
-
-        emit TaskCreated(taskHash, params.agentId, params.taskType, params.reward, params.deadline);
-
-        return taskHash;
+        _taskCreators[taskHash] = creator;
+        _agentValidations[agentId].push(taskHash);
     }
 
     /// @inheritdoc IJuryContract
@@ -210,14 +246,16 @@ contract JuryContract is IJuryContract {
         }
 
         // Update ERC-8004 validation status
+        bytes32 validationTag = bytes32(uint256(uint8(task.taskType) + 1));
         _validationStatuses[taskHash] = ValidationStatus({
             validatorAddress: address(this),
             agentId: task.agentId,
             response: task.finalResponse,
-            tag: bytes32(uint256(task.taskType)),
+            tag: validationTag,
             lastUpdate: block.timestamp
         });
 
+        emit ValidationResponse(address(this), task.agentId, taskHash, task.finalResponse, "", validationTag);
         emit TaskFinalized(taskHash, task.finalResponse, task.totalVotes, task.positiveVotes);
     }
 
@@ -327,10 +365,23 @@ contract JuryContract is IJuryContract {
         string calldata requestUri,
         bytes32 requestHash
     ) external {
-        // For JuryContract, we create a task instead of direct validation request
+        require(validatorAddress == address(this), "Unsupported validator");
+
         bytes32 taskHash = requestHash != bytes32(0)
             ? requestHash
             : keccak256(abi.encode(msg.sender, agentId, block.timestamp, requestUri));
+
+        _initTask(
+            taskHash,
+            msg.sender,
+            agentId,
+            TaskType.CONSENSUS_REQUIRED,
+            requestUri,
+            0,
+            block.timestamp + DEFAULT_REQUEST_DEADLINE_WINDOW,
+            DEFAULT_REQUEST_MIN_JURORS,
+            DEFAULT_CONSENSUS
+        );
 
         _validatorRequests[validatorAddress].push(taskHash);
 
@@ -370,33 +421,55 @@ contract JuryContract is IJuryContract {
     }
 
     /// @notice Get validation summary for agent (ERC-8004)
-    function getSummary(
-        uint256 agentId,
-        address[] calldata,
-        /* validatorAddresses */
-        bytes32 /* tag */
-    )
+    function getSummary(uint256 agentId, address[] calldata validatorAddresses, bytes32 tag)
         external
         view
         returns (uint64 count, uint8 avgResponse)
     {
         bytes32[] memory validations = _agentValidations[agentId];
-        if (validations.length == 0) {
-            return (0, 0);
-        }
+        if (validations.length == 0) return (0, 0);
 
         uint256 totalResponse = 0;
         uint64 validCount = 0;
 
         for (uint256 i = 0; i < validations.length; i++) {
-            Task memory task = _tasks[validations[i]];
-            if (task.status == TaskStatus.COMPLETED) {
-                totalResponse += task.finalResponse;
-                validCount++;
-            }
+            bytes32 requestHash = validations[i];
+            Task storage task = _tasks[requestHash];
+            if (task.status != TaskStatus.COMPLETED) continue;
+
+            ValidationStatus storage status = _validationStatuses[requestHash];
+            if (status.lastUpdate == 0) continue;
+            if (tag != bytes32(0) && status.tag != tag) continue;
+            if (!_validatorAllowed(status.validatorAddress, validatorAddresses)) continue;
+
+            totalResponse += status.response;
+            validCount++;
         }
 
         return (validCount, validCount > 0 ? uint8(totalResponse / validCount) : 0);
+    }
+
+    function _validatorAllowed(address validator, address[] calldata validatorAddresses) internal pure returns (bool) {
+        if (validatorAddresses.length == 0) return true;
+        for (uint256 i = 0; i < validatorAddresses.length; i++) {
+            if (validatorAddresses[i] == validator) return true;
+        }
+        return false;
+    }
+
+    function linkReceiptToValidation(bytes32 requestHash, bytes32 receiptId, string calldata receiptUri) external {
+        require(_taskCreators[requestHash] == msg.sender, "Not task creator");
+        require(receiptId != bytes32(0), "Invalid receipt");
+
+        if (_validationReceiptAdded[requestHash][receiptId]) return;
+        _validationReceiptAdded[requestHash][receiptId] = true;
+        _validationReceipts[requestHash].push(receiptId);
+
+        emit ValidationReceiptLinked(requestHash, receiptId, receiptUri, msg.sender);
+    }
+
+    function getValidationReceipts(bytes32 requestHash) external view returns (bytes32[] memory receiptIds) {
+        return _validationReceipts[requestHash];
     }
 
     /// @notice Get all validation request hashes for agent (ERC-8004)
