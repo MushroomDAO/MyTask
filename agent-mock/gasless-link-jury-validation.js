@@ -731,6 +731,19 @@ async function main() {
             },
             {
               type: "function",
+              name: "deriveValidationRequestHash",
+              stateMutability: "view",
+              inputs: [
+                { name: "taskId", type: "bytes32" },
+                { name: "agentId", type: "uint256" },
+                { name: "validatorAddress", type: "address" },
+                { name: "tag", type: "bytes32" },
+                { name: "requestUri", type: "string" }
+              ],
+              outputs: [{ name: "requestHash", type: "bytes32" }]
+            },
+            {
+              type: "function",
               name: "getValidationStatus",
               stateMutability: "view",
               inputs: [{ name: "requestHash", type: "bytes32" }],
@@ -772,6 +785,31 @@ async function main() {
               tag: validationTag,
               requestUri: validationRequestUri
             });
+
+          try {
+            const expectedOnchain = await publicClient.readContract({
+              address: juryContractAddress,
+              abi: juryAbi,
+              functionName: "deriveValidationRequestHash",
+              args: [taskId, agentId, juryContractAddress, validationTag, validationRequestUri]
+            });
+            if (expectedOnchain !== requestHash) {
+              entry.lastError = `requestHash mismatch: local=${requestHash} onchain=${expectedOnchain}`;
+              saveState();
+              logTaskEvent({
+                event: "orchestrator.requestHashMismatch",
+                ok: false,
+                mode,
+                taskId,
+                agentId: agentId.toString(),
+                requestHash,
+                expectedOnchain
+              });
+              return;
+            }
+          } catch (e) {
+            logTaskEvent({ event: "orchestrator.requestHashCheckUnavailable", ok: true, mode, error: String(e) });
+          }
 
           entry.requestHash = entry.requestHash ?? requestHash;
           entry.validation = entry.validation ?? {};
