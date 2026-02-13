@@ -48,6 +48,23 @@ function atomicWriteFile(filePath, data) {
   }
 }
 
+function readJsonRecovering(filePath, fallback) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    try {
+      if (fs.existsSync(filePath)) {
+        fs.renameSync(filePath, `${filePath}.corrupt-${Date.now()}`);
+      }
+    } catch {}
+    return fallback;
+  }
+}
+
+function writeJsonAtomic(filePath, obj) {
+  atomicWriteFile(filePath, JSON.stringify(obj, null, 2));
+}
+
 function sendJson(res, code, obj) {
   const body = JSON.stringify(obj);
   res.writeHead(code, { "content-type": "application/json", "content-length": Buffer.byteLength(body) });
@@ -91,16 +108,36 @@ async function main() {
   const outDir = path.dirname(outFile);
   ensureDir(outDir);
 
+  const cursorFile =
+    getArgValue(argv, "--cursorFile") ??
+    process.env.INDEXER_CURSOR_FILE ??
+    path.join(process.cwd(), "out", "indexer-cursor.json");
+  ensureDir(path.dirname(cursorFile));
+  const resume = parseBool(getArgValue(argv, "--resume") ?? process.env.INDEXER_RESUME, true);
+  const confirmations = BigInt(getArgValue(argv, "--confirmations") ?? process.env.INDEXER_CONFIRMATIONS ?? "0");
+  const chunkSize = BigInt(getArgValue(argv, "--chunkSize") ?? process.env.INDEXER_CHUNK_SIZE ?? "2000");
+
   const publicClient = createPublicClient({
     chain: { id: chainId, name: "custom", nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 }, rpcUrls: { default: { http: [rpcUrl] } } },
     transport: http(rpcUrl)
   });
 
-  const latestBlock = await publicClient.getBlockNumber();
   const fromBlockArg = getArgValue(argv, "--fromBlock") ?? process.env.FROM_BLOCK;
   const toBlockArg = getArgValue(argv, "--toBlock") ?? process.env.TO_BLOCK;
-  const fromBlock = fromBlockArg ? BigInt(fromBlockArg) : latestBlock > 5000n ? latestBlock - 5000n : 0n;
-  const toBlock = toBlockArg ? BigInt(toBlockArg) : latestBlock;
+  const latestBlock = await publicClient.getBlockNumber();
+  const safeToBlock = latestBlock > confirmations ? latestBlock - confirmations : 0n;
+  const cursor = resume ? readJsonRecovering(cursorFile, { lastProcessedBlock: "0" }) : { lastProcessedBlock: "0" };
+  const resumeFromBlock =
+    cursor?.lastProcessedBlock !== undefined ? BigInt(cursor.lastProcessedBlock) + 1n : 0n;
+  const fromBlock = fromBlockArg
+    ? BigInt(fromBlockArg)
+    : resume
+      ? resumeFromBlock
+      : safeToBlock > 5000n
+        ? safeToBlock - 5000n
+        : 0n;
+  const toBlockRaw = toBlockArg ? BigInt(toBlockArg) : safeToBlock;
+  const toBlock = toBlockRaw <= safeToBlock ? toBlockRaw : safeToBlock;
 
   const taskEscrowAbi = [
     {
@@ -245,9 +282,6 @@ async function main() {
     { type: "function", name: "getValidationReceipts", stateMutability: "view", inputs: [{ type: "bytes32" }], outputs: [{ type: "bytes32[]" }] }
   ];
 
-  const taskLogs = await publicClient.getLogs({ address: taskEscrow, fromBlock, toBlock });
-  const juryLogs = await publicClient.getLogs({ address: juryContract, fromBlock, toBlock });
-
   const state = {
     meta: {
       chainId,
@@ -256,6 +290,10 @@ async function main() {
       juryContract,
       fromBlock: fromBlock.toString(),
       toBlock: toBlock.toString(),
+      confirmations: confirmations.toString(),
+      cursorFile,
+      resume,
+      latestBlock: latestBlock.toString(),
       generatedAt: new Date().toISOString()
     },
     tasks: {},
@@ -274,23 +312,14 @@ async function main() {
     }
   };
 
-  for (const log of taskLogs) {
+  const ingestTaskEscrowLog = (log) => {
     const decoded = ingestEvent(taskEscrowAbi, log);
-    if (!decoded) continue;
-    if (decoded.name === "TaskCreated") {
+    if (!decoded) return;
+    if (decoded.name === "TaskCreated" || decoded.name === "WorkSubmitted" || decoded.name === "TaskFinalized") {
       const taskId = decoded.args.taskId;
       state.tasks[taskId] = state.tasks[taskId] ?? { taskId, events: [] };
       state.tasks[taskId].events.push({ name: decoded.name, blockNumber: toNumberSafe(log.blockNumber), args: decoded.args });
-    }
-    if (decoded.name === "WorkSubmitted") {
-      const taskId = decoded.args.taskId;
-      state.tasks[taskId] = state.tasks[taskId] ?? { taskId, events: [] };
-      state.tasks[taskId].events.push({ name: decoded.name, blockNumber: toNumberSafe(log.blockNumber), args: decoded.args });
-    }
-    if (decoded.name === "TaskFinalized") {
-      const taskId = decoded.args.taskId;
-      state.tasks[taskId] = state.tasks[taskId] ?? { taskId, events: [] };
-      state.tasks[taskId].events.push({ name: decoded.name, blockNumber: toNumberSafe(log.blockNumber), args: decoded.args });
+      return;
     }
     if (decoded.name === "ReceiptLinked") {
       const taskId = decoded.args.taskId;
@@ -300,20 +329,16 @@ async function main() {
       state.receipts[receiptId] = state.receipts[receiptId] ?? { receiptId, links: [] };
       state.receipts[receiptId].links.push({ kind: "task", taskId, receiptUri: decoded.args.receiptUri, linker: decoded.args.linker });
     }
-  }
+  };
 
-  for (const log of juryLogs) {
+  const ingestJuryLog = (log) => {
     const decoded = ingestEvent(juryAbi, log);
-    if (!decoded) continue;
-    if (decoded.name === "ValidationRequest") {
+    if (!decoded) return;
+    if (decoded.name === "ValidationRequest" || decoded.name === "ValidationResponse") {
       const requestHash = decoded.args.requestHash;
       state.validations[requestHash] = state.validations[requestHash] ?? { requestHash, events: [] };
       state.validations[requestHash].events.push({ name: decoded.name, blockNumber: toNumberSafe(log.blockNumber), args: decoded.args });
-    }
-    if (decoded.name === "ValidationResponse") {
-      const requestHash = decoded.args.requestHash;
-      state.validations[requestHash] = state.validations[requestHash] ?? { requestHash, events: [] };
-      state.validations[requestHash].events.push({ name: decoded.name, blockNumber: toNumberSafe(log.blockNumber), args: decoded.args });
+      return;
     }
     if (decoded.name === "ValidationReceiptLinked") {
       const requestHash = decoded.args.requestHash;
@@ -322,6 +347,16 @@ async function main() {
       state.validations[requestHash].events.push({ name: decoded.name, blockNumber: toNumberSafe(log.blockNumber), args: decoded.args });
       state.receipts[receiptId] = state.receipts[receiptId] ?? { receiptId, links: [] };
       state.receipts[receiptId].links.push({ kind: "validation", requestHash, receiptUri: decoded.args.receiptUri, linker: decoded.args.linker });
+    }
+  };
+
+  if (fromBlock <= toBlock) {
+    for (let start = fromBlock; start <= toBlock; start += chunkSize) {
+      const end = start + chunkSize - 1n <= toBlock ? start + chunkSize - 1n : toBlock;
+      const taskChunk = await publicClient.getLogs({ address: taskEscrow, fromBlock: start, toBlock: end });
+      for (const log of taskChunk) ingestTaskEscrowLog(log);
+      const juryChunk = await publicClient.getLogs({ address: juryContract, fromBlock: start, toBlock: end });
+      for (const log of juryChunk) ingestJuryLog(log);
     }
   }
 
@@ -447,6 +482,9 @@ async function main() {
   const digest = keccak256(bytes);
   const finalState = { digest, ...state };
   atomicWriteFile(outFile, JSON.stringify(finalState, null, 2));
+  if (toBlock >= 0n) {
+    writeJsonAtomic(cursorFile, { lastProcessedBlock: toBlock.toString(), updatedAt: new Date().toISOString() });
+  }
 
   const summary = {
     outFile,
