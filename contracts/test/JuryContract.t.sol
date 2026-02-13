@@ -457,6 +457,22 @@ contract JuryContractTest is Test {
         assertEq(requests.length, 1);
     }
 
+    function test_ValidationRequestRequiresNonZeroRequestHashWhenEnabled() public {
+        jury.setRequireNonZeroValidationRequestHash(true);
+
+        vm.prank(taskCreator);
+        vm.expectRevert("requestHash required");
+        jury.validationRequest(address(jury), AGENT_ID, "ipfs://request", bytes32(0));
+
+        bytes32 requestHash = keccak256("request");
+        vm.prank(taskCreator);
+        jury.validationRequest(address(jury), AGENT_ID, "ipfs://request", requestHash);
+
+        bytes32[] memory requests = jury.getValidatorRequests(address(jury));
+        assertEq(requests.length, 1);
+        assertEq(requests[0], requestHash);
+    }
+
     function test_GetSummaryFiltersByTagAndValidator() public {
         vm.prank(juror1);
         jury.registerJuror(MIN_STAKE);

@@ -53,6 +53,7 @@ contract JuryContract is IJuryContract {
     bytes32 public constant ROLE_VALIDATION_REQUESTER = keccak256("ROLE_VALIDATION_REQUESTER");
     bool public requireJurorRole;
     bool public requireValidationRequesterRole;
+    bool public requireNonZeroValidationRequestHash;
 
     // ====================================
     // Mappings
@@ -151,6 +152,10 @@ contract JuryContract is IJuryContract {
 
     function setRequireValidationRequesterRole(bool enabled) external onlyAdmin {
         requireValidationRequesterRole = enabled;
+    }
+
+    function setRequireNonZeroValidationRequestHash(bool enabled) external onlyAdmin {
+        requireNonZeroValidationRequestHash = enabled;
     }
 
     function grantRole(bytes32 role, address account) external onlyAdmin {
@@ -441,6 +446,9 @@ contract JuryContract is IJuryContract {
         }
         if (mySBT.code.length > 0) {
             require(_agentIdExists(agentId), "Invalid agentId");
+        }
+        if (requireNonZeroValidationRequestHash) {
+            require(requestHash != bytes32(0), "requestHash required");
         }
 
         bytes32 taskHash = requestHash != bytes32(0)
