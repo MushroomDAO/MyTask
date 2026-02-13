@@ -539,12 +539,13 @@ contract TaskEscrowV2 {
             revert NotParticipant();
         }
 
+        if (_taskReceiptAdded[taskId][receiptId]) return;
+
         TaskPolicy memory policy = _taskPolicies[taskId];
         if (policy.enabled && policy.maxReceipts > 0 && _taskReceipts[taskId].length >= policy.maxReceipts) {
             revert PolicyViolation();
         }
 
-        if (_taskReceiptAdded[taskId][receiptId]) return;
         _taskReceiptAdded[taskId][receiptId] = true;
         _taskReceipts[taskId].push(receiptId);
 
@@ -620,6 +621,8 @@ contract TaskEscrowV2 {
             revert NotParticipant();
         }
 
+        if (_taskValidationRequestAdded[taskId][requestHash]) return;
+
         TaskPolicy memory policy = _taskPolicies[taskId];
         if (
             policy.enabled && policy.maxValidationRequests > 0
@@ -628,7 +631,6 @@ contract TaskEscrowV2 {
             revert PolicyViolation();
         }
 
-        if (_taskValidationRequestAdded[taskId][requestHash]) return;
         _taskValidationRequestAdded[taskId][requestHash] = true;
         _taskValidationRequests[taskId].push(requestHash);
     }
