@@ -230,6 +230,14 @@ async function main() {
     const x402SponsorAddress = getArgValue(argv, "--x402Sponsor") ?? process.env.X402_SPONSOR_ADDRESS ?? null;
     const x402PolicyId = getArgValue(argv, "--x402PolicyId") ?? process.env.X402_POLICY_ID ?? "default";
 
+    const myShopItemsAddress = getArgValue(argv, "--myShopItems") ?? process.env.MYSHOP_ITEMS_ADDRESS ?? null;
+    const rewardItemIdRaw = getArgValue(argv, "--rewardItemId") ?? process.env.REWARD_ITEM_ID ?? null;
+    const rewardItemId = rewardItemIdRaw ? BigInt(rewardItemIdRaw) : null;
+    const rewardQuantity = BigInt(getArgValue(argv, "--rewardQuantity") ?? process.env.REWARD_QUANTITY ?? "1");
+    const rewardValue = BigInt(getArgValue(argv, "--rewardValue") ?? process.env.REWARD_VALUE ?? "0");
+    const rewardExtraDataHexRaw =
+      getArgValue(argv, "--rewardExtraDataHex") ?? process.env.REWARD_EXTRA_DATA_HEX ?? null;
+
     const walletClient = createWalletClient({
       account,
       chain: {
@@ -387,6 +395,22 @@ async function main() {
       );
     };
 
+    const sendTxWithValue = async ({ to, data, wallet, value }) => {
+      const from = wallet.account.address;
+      if (dryRun) {
+        logEvent({ event: "orchestrator.dryRunTx", mode, to, from, data, value: value?.toString?.() ?? String(value) });
+        return null;
+      }
+      return await withRetries(
+        async () => {
+          const hash = await wallet.sendTransaction({ to, data, value: value ?? 0n });
+          await publicClient.waitForTransactionReceipt({ hash });
+          return hash;
+        },
+        { retries: 2, baseDelayMs: 300, label: "sendTxWithValue" }
+      );
+    };
+
     const rpcRequest = async (method, params) => {
       return await publicClient.request({ method, params });
     };
@@ -463,11 +487,14 @@ async function main() {
 
         const status = Number(task.status);
         if (status >= 5) {
-          entry.done = true;
           entry.lastError = null;
           saveState();
           logEvent({ event: "orchestrator.skipDoneTask", mode, taskId, status, source });
-          return;
+          if (!myShopItemsAddress || !rewardItemId || entry.rewardTriggered === true) {
+            entry.done = true;
+            saveState();
+            return;
+          }
         }
 
         const shouldAccept = autoAccept && status === 0;
@@ -706,6 +733,74 @@ async function main() {
 
         const finalTask = await publicClient.readContract({ address: taskEscrow, abi: taskEscrowAbi, functionName: "getTask", args: [taskId] });
         const finalStatus = Number(finalTask.status);
+
+        if (myShopItemsAddress && rewardItemId && entry.rewardTriggered !== true && finalStatus >= 5) {
+          const myShopItemsAbi = [
+            {
+              type: "function",
+              name: "buy",
+              stateMutability: "payable",
+              inputs: [
+                { name: "itemId", type: "uint256" },
+                { name: "quantity", type: "uint256" },
+                { name: "recipient", type: "address" },
+                { name: "extraData", type: "bytes" }
+              ],
+              outputs: [{ name: "firstTokenId", type: "uint256" }]
+            }
+          ];
+
+          const extraData =
+            rewardExtraDataHexRaw && rewardExtraDataHexRaw.startsWith("0x")
+              ? rewardExtraDataHexRaw
+              : rewardExtraDataHexRaw
+                ? `0x${rewardExtraDataHexRaw}`
+                : toHex(
+                    JSON.stringify({
+                      taskId: String(taskId),
+                      juryTaskHash: String(finalTask.juryTaskHash),
+                      taskor: String(finalTask.taskor),
+                      community: String(finalTask.community)
+                    })
+                  );
+
+          const rewardData = encodeFunctionData({
+            abi: myShopItemsAbi,
+            functionName: "buy",
+            args: [rewardItemId, rewardQuantity, finalTask.taskor, extraData]
+          });
+
+          entry.rewardAttemptedAt = new Date().toISOString();
+          saveState();
+          try {
+            const rewardTxHash = await sendTxWithValue({
+              to: myShopItemsAddress,
+              data: rewardData,
+              wallet: walletClient,
+              value: rewardValue
+            });
+            entry.rewardTriggered = true;
+            entry.rewardTxHash = rewardTxHash;
+            saveState();
+            logEvent({
+              event: "orchestrator.rewardTriggered",
+              mode,
+              taskId,
+              myShopItemsAddress,
+              itemId: rewardItemId.toString(),
+              quantity: rewardQuantity.toString(),
+              recipient: finalTask.taskor,
+              value: rewardValue.toString(),
+              txHash: rewardTxHash
+            });
+          } catch (e) {
+            entry.rewardTriggered = false;
+            entry.rewardError = String(e);
+            saveState();
+            logEvent({ event: "orchestrator.rewardFailed", mode, taskId, error: String(e) });
+          }
+        }
+
         if (finalStatus >= 5 || requireManualFinalize) {
           entry.done = true;
         }
