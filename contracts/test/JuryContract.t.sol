@@ -6,11 +6,28 @@ import {JuryContract} from "../src/JuryContract.sol";
 import {IJuryContract} from "../src/interfaces/IJuryContract.sol";
 import {ERC20Mock} from "./mocks/ERC20Mock.sol";
 
+contract MySBTMock {
+    mapping(uint256 => address) private _owners;
+
+    function mint(address to, uint256 tokenId) external {
+        require(to != address(0), "Invalid to");
+        require(_owners[tokenId] == address(0), "Already minted");
+        _owners[tokenId] = to;
+    }
+
+    function ownerOf(uint256 tokenId) external view returns (address) {
+        address owner = _owners[tokenId];
+        require(owner != address(0), "NOT_MINTED");
+        return owner;
+    }
+}
+
 contract JuryContractTest is Test {
     JuryContract public jury;
     ERC20Mock public stakingToken;
+    MySBTMock public sbt;
 
-    address public mySBT = address(0x1234);
+    address public mySBT;
     address public juror1 = address(0x1001);
     address public juror2 = address(0x1002);
     address public juror3 = address(0x1003);
@@ -22,6 +39,10 @@ contract JuryContractTest is Test {
     function setUp() public {
         // Deploy mock staking token
         stakingToken = new ERC20Mock("Test Token", "TEST", 18);
+
+        sbt = new MySBTMock();
+        sbt.mint(taskCreator, AGENT_ID);
+        mySBT = address(sbt);
 
         // Deploy JuryContract
         jury = new JuryContract(mySBT, address(stakingToken), MIN_STAKE);
@@ -209,6 +230,34 @@ contract JuryContractTest is Test {
         assertEq(response, 100);
     }
 
+    function test_TagRoleGatesValidationResponse() public {
+        bytes32 tag = bytes32("TAG");
+        bytes32 role = keccak256("ROLE_TAG_VALIDATOR");
+        jury.setTagRole(tag, role);
+
+        bytes32 requestHash = keccak256("test-request");
+
+        vm.prank(taskCreator);
+        jury.validationRequest(address(jury), AGENT_ID, "ipfs://request", requestHash);
+
+        vm.prank(address(0xBEEF));
+        vm.expectRevert("Missing role");
+        jury.validationResponse(requestHash, 80, "ipfs://resp", bytes32(0), tag);
+
+        jury.grantRole(role, address(0xBEEF));
+
+        vm.prank(address(0xBEEF));
+        jury.validationResponse(requestHash, 80, "ipfs://resp", bytes32(0), tag);
+
+        (address validatorAddress, uint256 agentId, uint8 response, bytes32 statusTag, uint256 lastUpdate) =
+            jury.getValidationStatus(requestHash);
+        assertEq(validatorAddress, address(0xBEEF));
+        assertEq(agentId, AGENT_ID);
+        assertEq(response, 80);
+        assertEq(statusTag, tag);
+        assertEq(lastUpdate, block.timestamp);
+    }
+
     function test_GetAgentValidations() public {
         // Create multiple tasks for same agent
         IJuryContract.TaskParams memory params = IJuryContract.TaskParams({
@@ -249,6 +298,12 @@ contract JuryContractTest is Test {
         vm.prank(taskCreator);
         vm.expectRevert("Unsupported validator");
         jury.validationRequest(address(0xBEEF), AGENT_ID, "ipfs://request", bytes32(0));
+    }
+
+    function test_ValidationRequestRejectsInvalidAgentId() public {
+        vm.prank(taskCreator);
+        vm.expectRevert("Invalid agentId");
+        jury.validationRequest(address(jury), 999, "ipfs://request", bytes32(0));
     }
 
     function test_GetSummaryFiltersByTagAndValidator() public {

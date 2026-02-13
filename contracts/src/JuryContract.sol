@@ -4,6 +4,10 @@ pragma solidity ^0.8.23;
 import {IJuryContract} from "./interfaces/IJuryContract.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
+interface IMySBT {
+    function ownerOf(uint256 tokenId) external view returns (address);
+}
+
 /**
  * @title JuryContract
  * @notice ERC-8004 Validation Registry implementation with jury-based verification
@@ -43,6 +47,8 @@ contract JuryContract is IJuryContract {
 
     /// @notice Task counter for unique IDs
     uint256 private _taskCounter;
+
+    address public admin;
 
     // ====================================
     // Mappings
@@ -84,6 +90,9 @@ contract JuryContract is IJuryContract {
     mapping(bytes32 => bytes32[]) private _validationReceipts;
     mapping(bytes32 => mapping(bytes32 => bool)) private _validationReceiptAdded;
 
+    mapping(bytes32 => bytes32) private _tagRoles;
+    mapping(bytes32 => mapping(address => bool)) private _roles;
+
     struct ValidationStatus {
         address validatorAddress;
         uint256 agentId;
@@ -95,6 +104,11 @@ contract JuryContract is IJuryContract {
     event ValidationReceiptLinked(
         bytes32 indexed requestHash, bytes32 indexed receiptId, string receiptUri, address indexed linker
     );
+
+    event AdminUpdated(address indexed oldAdmin, address indexed newAdmin);
+    event RoleGranted(bytes32 indexed role, address indexed account);
+    event RoleRevoked(bytes32 indexed role, address indexed account);
+    event TagRoleSet(bytes32 indexed tag, bytes32 indexed role);
 
     // ====================================
     // Constructor
@@ -113,6 +127,41 @@ contract JuryContract is IJuryContract {
         mySBT = _mySBT;
         stakingToken = _stakingToken;
         minJurorStake = _minStake;
+        admin = msg.sender;
+    }
+
+    modifier onlyAdmin() {
+        require(msg.sender == admin, "Not admin");
+        _;
+    }
+
+    function setAdmin(address newAdmin) external onlyAdmin {
+        require(newAdmin != address(0), "Invalid admin");
+        emit AdminUpdated(admin, newAdmin);
+        admin = newAdmin;
+    }
+
+    function grantRole(bytes32 role, address account) external onlyAdmin {
+        _roles[role][account] = true;
+        emit RoleGranted(role, account);
+    }
+
+    function revokeRole(bytes32 role, address account) external onlyAdmin {
+        _roles[role][account] = false;
+        emit RoleRevoked(role, account);
+    }
+
+    function hasRole(bytes32 role, address account) external view returns (bool) {
+        return _roles[role][account];
+    }
+
+    function setTagRole(bytes32 tag, bytes32 role) external onlyAdmin {
+        _tagRoles[tag] = role;
+        emit TagRoleSet(tag, role);
+    }
+
+    function getTagRole(bytes32 tag) external view returns (bytes32) {
+        return _tagRoles[tag];
     }
 
     // ====================================
@@ -366,6 +415,9 @@ contract JuryContract is IJuryContract {
         bytes32 requestHash
     ) external {
         require(validatorAddress == address(this), "Unsupported validator");
+        if (mySBT.code.length > 0) {
+            require(_agentIdExists(agentId), "Invalid agentId");
+        }
 
         bytes32 taskHash = requestHash != bytes32(0)
             ? requestHash
@@ -399,6 +451,11 @@ contract JuryContract is IJuryContract {
         Task storage task = _tasks[requestHash];
         require(task.taskHash != bytes32(0), "Task not found");
 
+        bytes32 requiredRole = _tagRoles[tag];
+        if (requiredRole != bytes32(0)) {
+            require(_roles[requiredRole][msg.sender], "Missing role");
+        }
+
         _validationStatuses[requestHash] = ValidationStatus({
             validatorAddress: msg.sender,
             agentId: task.agentId,
@@ -408,6 +465,14 @@ contract JuryContract is IJuryContract {
         });
 
         emit ValidationResponse(msg.sender, task.agentId, requestHash, response, responseUri, tag);
+    }
+
+    function _agentIdExists(uint256 agentId) internal view returns (bool) {
+        try IMySBT(mySBT).ownerOf(agentId) returns (address owner) {
+            return owner != address(0);
+        } catch {
+            return false;
+        }
     }
 
     /// @notice Get validation status (ERC-8004)
