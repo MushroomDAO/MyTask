@@ -168,6 +168,25 @@ function toNumberSafe(v) {
   return Number(v);
 }
 
+function readBody(req, maxBytes) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let total = 0;
+    req.on("data", (c) => {
+      total += c.length;
+      if (maxBytes && total > maxBytes) {
+        try {
+          req.destroy();
+        } catch {}
+        return reject(Object.assign(new Error("body-too-large"), { code: "body-too-large" }));
+      }
+      chunks.push(c);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
+}
+
 async function main() {
   const argv = process.argv.slice(2);
   const rpcUrl = getArgValue(argv, "--rpcUrl") ?? process.env.RPC_URL ?? requireEnv("RPC_URL");
@@ -196,6 +215,11 @@ async function main() {
   const reputationOutDir =
     getArgValue(argv, "--reputationOutDir") ?? process.env.INDEXER_REPUTATION_OUT_DIR ?? outDir;
   const tagWindowDays = Number(getArgValue(argv, "--tagWindowDays") ?? process.env.INDEXER_TAG_WINDOW_DAYS ?? "30");
+  const agentMock = parseBool(getArgValue(argv, "--agentMock") ?? process.env.INDEXER_AGENT_MOCK, false);
+  const agentMockStoreFile =
+    getArgValue(argv, "--agentMockStore") ??
+    process.env.INDEXER_AGENT_MOCK_STORE ??
+    path.join(outDir, "agent-mock-store.json");
 
   const cursorFile =
     getArgValue(argv, "--cursorFile") ??
@@ -742,6 +766,32 @@ async function main() {
 
   if (!serve) return;
 
+  let agentMockStore = null;
+  if (agentMock) {
+    ensureDir(path.dirname(agentMockStoreFile));
+    agentMockStore = readJsonRecovering(agentMockStoreFile, { version: 1, order: [], requests: {} });
+    agentMockStore.order = Array.isArray(agentMockStore.order) ? agentMockStore.order : [];
+    agentMockStore.requests = agentMockStore.requests && typeof agentMockStore.requests === "object" ? agentMockStore.requests : {};
+  }
+
+  const saveAgentMockStore = () => {
+    if (!agentMockStore) return;
+    writeJsonAtomic(agentMockStoreFile, agentMockStore);
+  };
+
+  const rememberAgentMockResponse = (key, entry) => {
+    if (!agentMockStore) return;
+    if (agentMockStore.requests[key]) return agentMockStore.requests[key];
+    agentMockStore.requests[key] = entry;
+    agentMockStore.order.push(key);
+    while (agentMockStore.order.length > 1000) {
+      const oldKey = agentMockStore.order.shift();
+      if (oldKey) delete agentMockStore.requests[oldKey];
+    }
+    saveAgentMockStore();
+    return entry;
+  };
+
   const flattenValidations = () => {
     const all = [];
     for (const taskId of Object.keys(finalState.tasks)) {
@@ -780,10 +830,61 @@ async function main() {
     return arr;
   };
 
-  const server = nodeHttp.createServer((req, res) => {
+  const server = nodeHttp.createServer(async (req, res) => {
     const traceId = req.headers["x-trace-id"] ? String(req.headers["x-trace-id"]) : randomId();
     const u = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
     const p = u.pathname;
+
+    if (agentMock && req.method === "POST" && p.startsWith("/agent/")) {
+      let bodyRaw = "";
+      try {
+        bodyRaw = await readBody(req, 64 * 1024);
+      } catch (e) {
+        logEvent({ event: "indexer.http", ok: false, traceId, method: req.method, path: p, code: 413, error: String(e) });
+        return sendJson(res, 413, { error: "body-too-large" });
+      }
+
+      let body = null;
+      try {
+        body = bodyRaw ? JSON.parse(bodyRaw) : {};
+      } catch {
+        logEvent({ event: "indexer.http", ok: false, traceId, method: req.method, path: p, code: 400 });
+        return sendJson(res, 400, { error: "invalid-json" });
+      }
+
+      const idempotencyKey = keccak256(toHex(stableStringify({ path: p, body })));
+      const cached = agentMockStore?.requests?.[idempotencyKey];
+      if (cached?.response) {
+        logEvent({ event: "indexer.http", ok: true, traceId, method: req.method, path: p, code: 200, cached: true });
+        return sendJson(res, 200, cached.response);
+      }
+
+      const receivedAt = new Date().toISOString();
+      let response = null;
+
+      if (p === "/agent/tasks/onCreated") {
+        response = { ok: true, accepted: true, agentTaskId: body?.taskId ? `agent-${body.taskId}` : `agent-${randomId()}` };
+      } else if (p === "/agent/tasks/onEvidenceSubmitted") {
+        response = { ok: true, juryTaskHash: null };
+      } else if (p === "/agent/jury/assign") {
+        const candidateJurors = Array.isArray(body?.candidateJurors) ? body.candidateJurors : [];
+        const minJurors = Number(body?.minJurors ?? 0);
+        const selectedJurors = candidateJurors.slice(0, Math.max(0, Math.floor(minJurors)));
+        const juryTaskHash = keccak256(toHex(stableStringify({ taskId: body?.taskId ?? null, selectedJurors, runId })));
+        response = { ok: true, selectedJurors, juryTaskHash };
+      } else if (p === "/agent/jury/result") {
+        response = { ok: true, txHash: null };
+      } else if (p === "/agent/reward/trigger") {
+        response = { ok: true, txHash: null };
+      } else {
+        logEvent({ event: "indexer.http", ok: false, traceId, method: req.method, path: p, code: 404 });
+        return sendJson(res, 404, { error: "not-found" });
+      }
+
+      rememberAgentMockResponse(idempotencyKey, { receivedAt, path: p, request: body, response });
+      logEvent({ event: "indexer.http", ok: true, traceId, method: req.method, path: p, code: 200, agentMock: true });
+      return sendJson(res, 200, response);
+    }
 
     if (req.method === "GET" && p === "/health") {
       return sendJson(res, 200, { ok: true });
