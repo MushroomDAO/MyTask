@@ -30,6 +30,40 @@ function stableStringify(v) {
   return "null";
 }
 
+function buildReputationSnapshotFromFinalState(finalState, agentId) {
+  const agentKey = String(agentId);
+  const agent = finalState.agents?.[agentKey];
+  if (!agent) return null;
+
+  const validations = [];
+  for (const taskId of Object.keys(finalState.tasks ?? {})) {
+    const t = finalState.tasks[taskId];
+    const vals = t?.validations ?? [];
+    for (const v of vals) {
+      if (String(v?.agentId ?? "") !== agentKey) continue;
+      validations.push({ taskId, ...v });
+    }
+  }
+  validations.sort((a, b) => Number(BigInt(b.lastUpdate ?? "0") - BigInt(a.lastUpdate ?? "0")));
+
+  const payload = {
+    schema: "aastar.agentReputation@v1",
+    chainId: String(finalState.meta.chainId),
+    juryContract: finalState.meta.juryContract,
+    generatedAt: finalState.meta.generatedAt,
+    agentId: agentKey,
+    owner: agent.owner ?? null,
+    ownerSource: agent.ownerSource ?? null,
+    byTag: agent.byTag ?? {},
+    byValidator: agent.byValidator ?? {},
+    byTagWindow: agent.byTagWindow ?? null,
+    validations
+  };
+  const canonical = stableStringify(payload);
+  const digest = keccak256(toHex(canonical));
+  return { digest, canonical, reputation: payload };
+}
+
 function getArgValue(argv, key) {
   const i = argv.indexOf(key);
   if (i === -1) return undefined;
@@ -154,6 +188,14 @@ async function main() {
     getArgValue(argv, "--out") ?? process.env.INDEXER_OUT ?? path.join(process.cwd(), "out", "index.json");
   const outDir = path.dirname(outFile);
   ensureDir(outDir);
+
+  const writeReputationSnapshots = parseBool(
+    getArgValue(argv, "--writeReputationSnapshots") ?? process.env.INDEXER_WRITE_REPUTATION_SNAPSHOTS,
+    false
+  );
+  const reputationOutDir =
+    getArgValue(argv, "--reputationOutDir") ?? process.env.INDEXER_REPUTATION_OUT_DIR ?? outDir;
+  const tagWindowDays = Number(getArgValue(argv, "--tagWindowDays") ?? process.env.INDEXER_TAG_WINDOW_DAYS ?? "30");
 
   const cursorFile =
     getArgValue(argv, "--cursorFile") ??
@@ -621,6 +663,41 @@ async function main() {
     }
   }
 
+  const tagWindowDaysSafe = Number.isFinite(tagWindowDays) ? Math.max(0, Math.floor(tagWindowDays)) : 30;
+  if (tagWindowDaysSafe > 0) {
+    const cutoff = now > BigInt(tagWindowDaysSafe) * 86400n ? now - BigInt(tagWindowDaysSafe) * 86400n : 0n;
+    const windowTotals = {};
+    for (const taskId of Object.keys(state.tasks)) {
+      const t = state.tasks[taskId];
+      const vals = t?.validations ?? [];
+      for (const v of vals) {
+        const lastUpdate = BigInt(v?.lastUpdate ?? "0");
+        if (lastUpdate === 0n || lastUpdate < cutoff) continue;
+        const agentId = String(v.agentId);
+        const tag = v.tag;
+        windowTotals[agentId] = windowTotals[agentId] ?? {};
+        const cur = windowTotals[agentId][tag] ?? { count: 0, total: 0 };
+        cur.count += 1;
+        cur.total += Number(v.response ?? 0);
+        windowTotals[agentId][tag] = cur;
+      }
+    }
+
+    for (const agentId of Object.keys(state.agents)) {
+      const totalsByTag = windowTotals[agentId] ?? {};
+      const byTagWindow = {};
+      for (const tag of Object.keys(totalsByTag)) {
+        const v = totalsByTag[tag];
+        byTagWindow[tag] = { count: v.count, avg: v.count > 0 ? Math.floor(v.total / v.count) : 0 };
+      }
+      state.agents[agentId].byTagWindow = {
+        windowDays: tagWindowDaysSafe,
+        since: cutoff.toString(),
+        byTag: byTagWindow
+      };
+    }
+  }
+
   try {
     const mySbt = await publicClient.readContract({ address: juryContract, abi: juryAbi, functionName: "getMySBT", args: [] });
     if (mySbt && mySbt !== "0x0000000000000000000000000000000000000000") {
@@ -638,6 +715,15 @@ async function main() {
   const digest = keccak256(bytes);
   const finalState = { digest, ...state };
   atomicWriteFile(outFile, JSON.stringify(finalState, null, 2));
+  if (writeReputationSnapshots) {
+    ensureDir(reputationOutDir);
+    for (const agentId of Object.keys(finalState.agents ?? {})) {
+      const snapshot = buildReputationSnapshotFromFinalState(finalState, agentId);
+      if (!snapshot) continue;
+      const filePath = path.join(reputationOutDir, `reputation-${agentId}.json`);
+      atomicWriteFile(filePath, JSON.stringify(snapshot, null, 2));
+    }
+  }
   if (toBlock >= 0n) {
     writeJsonAtomic(cursorFile, { lastProcessedBlock: toBlock.toString(), updatedAt: new Date().toISOString() });
   }
@@ -692,39 +778,6 @@ async function main() {
     });
     arr.sort((a, b) => Number(BigInt(b.createdAt ?? "0") - BigInt(a.createdAt ?? "0")));
     return arr;
-  };
-
-  const buildReputationSnapshot = (agentId) => {
-    const agentKey = String(agentId);
-    const agent = finalState.agents[agentKey];
-    if (!agent) return null;
-
-    const validations = [];
-    for (const taskId of Object.keys(finalState.tasks)) {
-      const t = finalState.tasks[taskId];
-      const vals = t?.validations ?? [];
-      for (const v of vals) {
-        if (String(v?.agentId ?? "") !== agentKey) continue;
-        validations.push({ taskId, ...v });
-      }
-    }
-    validations.sort((a, b) => Number(BigInt(b.lastUpdate ?? "0") - BigInt(a.lastUpdate ?? "0")));
-
-    const payload = {
-      schema: "aastar.agentReputation@v1",
-      chainId: String(finalState.meta.chainId),
-      juryContract: finalState.meta.juryContract,
-      generatedAt: finalState.meta.generatedAt,
-      agentId: agentKey,
-      owner: agent.owner ?? null,
-      ownerSource: agent.ownerSource ?? null,
-      byTag: agent.byTag ?? {},
-      byValidator: agent.byValidator ?? {},
-      validations
-    };
-    const canonical = stableStringify(payload);
-    const digest = keccak256(toHex(canonical));
-    return { digest, canonical, reputation: payload };
   };
 
   const server = nodeHttp.createServer((req, res) => {
@@ -814,7 +867,7 @@ async function main() {
 
     if (req.method === "GET" && p.startsWith("/reputation/")) {
       const agentId = p.split("/").pop();
-      const snapshot = buildReputationSnapshot(agentId);
+      const snapshot = buildReputationSnapshotFromFinalState(finalState, agentId);
       if (!snapshot) {
         logEvent({ event: "indexer.http", ok: false, traceId, method: req.method, path: p, code: 404 });
         return sendJson(res, 404, { error: "not-found" });
