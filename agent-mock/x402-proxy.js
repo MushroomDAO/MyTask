@@ -11,6 +11,10 @@ function getArgValue(argv, key) {
   return argv[i + 1];
 }
 
+function randomId() {
+  return `${Date.now()}-${process.pid}-${Math.random().toString(16).slice(2)}`;
+}
+
 function ensureDir(p) {
   fs.mkdirSync(p, { recursive: true });
 }
@@ -41,6 +45,33 @@ function atomicWriteFile(filePath, data) {
 function writeJsonAtomic(filePath, obj) {
   atomicWriteFile(filePath, JSON.stringify(obj, null, 2));
 }
+
+function rotateLogIfNeeded(filePath, maxBytes) {
+  if (!filePath || !maxBytes || maxBytes <= 0) return;
+  try {
+    const st = fs.statSync(filePath);
+    if (!st.isFile()) return;
+    if (st.size < maxBytes) return;
+    const rotatedPath = `${filePath}.rotated-${Date.now()}`;
+    fs.renameSync(filePath, rotatedPath);
+  } catch {}
+}
+
+function createLogger({ baseFields, logFile, logMaxBytes }) {
+  return (obj) => {
+    const lineObj = { ts: new Date().toISOString(), ...baseFields, ...obj };
+    try {
+      process.stdout.write(JSON.stringify(lineObj) + "\n");
+    } catch {}
+    if (!logFile) return;
+    try {
+      rotateLogIfNeeded(logFile, logMaxBytes);
+      fs.appendFileSync(logFile, JSON.stringify(lineObj) + "\n");
+    } catch {}
+  };
+}
+
+let logEvent = () => {};
 
 function readJsonRecovering(filePath, fallback) {
   try {
@@ -137,12 +168,6 @@ function todayKey() {
   return `${yyyy}-${mm}-${dd}`;
 }
 
-function logEvent(obj) {
-  try {
-    process.stdout.write(JSON.stringify({ ts: new Date().toISOString(), ...obj }) + "\n");
-  } catch {}
-}
-
 function getClientIp(req) {
   const xf = req.headers["x-forwarded-for"];
   const ip = Array.isArray(xf) ? xf[0] : xf;
@@ -201,6 +226,11 @@ async function main() {
   const payerLimiter = createWindowCounter({ windowMs: rateWindowMs, limit: ratePayerPerWindow });
   const sponsorLimiter = createWindowCounter({ windowMs: rateWindowMs, limit: rateSponsorPerWindow });
 
+  const runId = getArgValue(argv, "--runId") ?? process.env.RUN_ID ?? randomId();
+  const logFile = getArgValue(argv, "--logFile") ?? process.env.X402_LOG_FILE ?? null;
+  const logMaxBytes = Number(getArgValue(argv, "--logMaxBytes") ?? process.env.X402_LOG_MAX_BYTES ?? "0");
+  logEvent = createLogger({ baseFields: { service: "x402-proxy", runId }, logFile, logMaxBytes });
+
   ensureDir(storeDir);
   const receiptsDir = path.join(storeDir, "items");
   ensureDir(receiptsDir);
@@ -212,8 +242,19 @@ async function main() {
     return a;
   };
 
+  const startedAtMs = Date.now();
+  const counters = {
+    requestsTotal: 0,
+    payOkTotal: 0,
+    payFailTotal: 0,
+    rateLimitedTotal: 0,
+    rateLimitedByKind: { ip: 0, payer: 0, sponsor: 0 }
+  };
+
   const server = http.createServer(async (req, res) => {
+    counters.requestsTotal += 1;
     const startedAt = Date.now();
+    const traceId = req.headers["x-trace-id"] ? String(req.headers["x-trace-id"]) : randomId();
     if (req.method === "GET" && req.url === "/") {
       const accounting = loadAccounting();
       let receipts = [];
@@ -258,7 +299,23 @@ async function main() {
     }
 
     if (req.method === "GET" && req.url === "/health") {
+      logEvent({ event: "x402.http", ok: true, traceId, method: req.method, path: "/health", code: 200, ms: Date.now() - startedAt });
       return sendJson(res, 200, { ok: true });
+    }
+
+    if (req.method === "GET" && req.url === "/metrics") {
+      const accounting = loadAccounting();
+      const day = todayKey();
+      const metrics = {
+        ok: true,
+        service: "x402-proxy",
+        runId,
+        uptimeMs: Date.now() - startedAtMs,
+        counters,
+        today: { day, accounting: accounting.days[day] ?? null }
+      };
+      logEvent({ event: "x402.http", ok: true, traceId, method: req.method, path: "/metrics", code: 200, ms: Date.now() - startedAt });
+      return sendJson(res, 200, metrics);
     }
 
     if (req.method === "GET" && req.url === "/stats") {
@@ -267,6 +324,7 @@ async function main() {
       try {
         receiptCount = fs.readdirSync(receiptsDir).filter((n) => n.endsWith(".json")).length;
       } catch {}
+      logEvent({ event: "x402.http", ok: true, traceId, method: req.method, path: "/stats", code: 200, ms: Date.now() - startedAt });
       return sendJson(res, 200, { ok: true, accounting, receiptCount });
     }
 
@@ -283,33 +341,42 @@ async function main() {
           .sort((a, b) => b.mtimeMs - a.mtimeMs)
           .slice(0, 100);
       } catch {}
+      logEvent({ event: "x402.http", ok: true, traceId, method: req.method, path: "/receipts", code: 200, ms: Date.now() - startedAt });
       return sendJson(res, 200, { ok: true, receipts });
     }
 
     if (req.method === "GET" && req.url && req.url.startsWith("/receipts/")) {
       const receiptId = req.url.split("/").pop();
       const filePath = path.join(receiptsDir, `${receiptId}.json`);
-      if (!fs.existsSync(filePath)) return sendJson(res, 404, { error: "not-found" });
+      if (!fs.existsSync(filePath)) {
+        logEvent({ event: "x402.http", ok: false, traceId, method: req.method, path: req.url, code: 404, ms: Date.now() - startedAt });
+        return sendJson(res, 404, { error: "not-found" });
+      }
       res.writeHead(200, { "content-type": "application/json" });
       fs.createReadStream(filePath).pipe(res);
       return;
     }
 
     if (req.method !== "POST" || req.url !== "/pay") {
+      logEvent({ event: "x402.http", ok: false, traceId, method: req.method, path: req.url, code: 404, ms: Date.now() - startedAt });
       return sendJson(res, 404, { error: "not-found" });
     }
 
     const clientIp = getClientIp(req);
     const ipRate = ipLimiter.consume(clientIp);
     if (!ipRate.ok) {
-      logEvent({ event: "x402.rateLimit", ok: false, kind: "ip", clientIp, resetMs: ipRate.resetMs, ms: Date.now() - startedAt });
+      counters.rateLimitedTotal += 1;
+      counters.rateLimitedByKind.ip += 1;
+      counters.payFailTotal += 1;
+      logEvent({ event: "x402.rateLimit", ok: false, traceId, kind: "ip", clientIp, resetMs: ipRate.resetMs, ms: Date.now() - startedAt });
       res.writeHead(429, { "content-type": "application/json", "retry-after": String(Math.ceil(ipRate.resetMs / 1000)) });
       return res.end(JSON.stringify({ error: "rate-limited", kind: "ip" }));
     }
 
     const ct = String(req.headers["content-type"] ?? "");
     if (!ct.toLowerCase().includes("application/json")) {
-      logEvent({ event: "x402.pay", ok: false, error: "unsupported-content-type", contentType: ct, clientIp, ms: Date.now() - startedAt });
+      counters.payFailTotal += 1;
+      logEvent({ event: "x402.pay", ok: false, traceId, error: "unsupported-content-type", contentType: ct, clientIp, ms: Date.now() - startedAt });
       return sendJson(res, 415, { error: "unsupported-content-type" });
     }
 
@@ -319,7 +386,8 @@ async function main() {
     } catch (e) {
       const code = e?.code ?? "";
       if (code === "body-too-large") {
-        logEvent({ event: "x402.pay", ok: false, error: "body-too-large", clientIp, ms: Date.now() - startedAt });
+        counters.payFailTotal += 1;
+        logEvent({ event: "x402.pay", ok: false, traceId, error: "body-too-large", clientIp, ms: Date.now() - startedAt });
         return sendJson(res, 413, { error: "body-too-large" });
       }
       throw e;
@@ -328,7 +396,8 @@ async function main() {
     try {
       body = JSON.parse(raw || "{}");
     } catch {
-      logEvent({ event: "x402.pay", ok: false, error: "invalid-json", ms: Date.now() - startedAt });
+      counters.payFailTotal += 1;
+      logEvent({ event: "x402.pay", ok: false, traceId, error: "invalid-json", ms: Date.now() - startedAt });
       return sendJson(res, 400, { error: "invalid-json" });
     }
 
@@ -344,23 +413,28 @@ async function main() {
     const metadata = body.metadata ?? null;
 
     if (!url) {
-      logEvent({ event: "x402.pay", ok: false, error: "missing-url", ms: Date.now() - startedAt });
+      counters.payFailTotal += 1;
+      logEvent({ event: "x402.pay", ok: false, traceId, error: "missing-url", ms: Date.now() - startedAt });
       return sendJson(res, 400, { error: "missing-url" });
     }
     if (String(url).length > 2048) {
-      logEvent({ event: "x402.pay", ok: false, error: "url-too-long", ms: Date.now() - startedAt });
+      counters.payFailTotal += 1;
+      logEvent({ event: "x402.pay", ok: false, traceId, error: "url-too-long", ms: Date.now() - startedAt });
       return sendJson(res, 400, { error: "url-too-long" });
     }
     if (String(method).length > 32) {
-      logEvent({ event: "x402.pay", ok: false, error: "method-too-long", ms: Date.now() - startedAt });
+      counters.payFailTotal += 1;
+      logEvent({ event: "x402.pay", ok: false, traceId, error: "method-too-long", ms: Date.now() - startedAt });
       return sendJson(res, 400, { error: "method-too-long" });
     }
     if (!/^[0-9]+$/.test(amount)) {
-      logEvent({ event: "x402.pay", ok: false, error: "invalid-amount", amount, ms: Date.now() - startedAt });
+      counters.payFailTotal += 1;
+      logEvent({ event: "x402.pay", ok: false, traceId, error: "invalid-amount", amount, ms: Date.now() - startedAt });
       return sendJson(res, 400, { error: "invalid-amount" });
     }
     if (metadata && JSON.stringify(metadata).length > 16 * 1024) {
-      logEvent({ event: "x402.pay", ok: false, error: "metadata-too-large", ms: Date.now() - startedAt });
+      counters.payFailTotal += 1;
+      logEvent({ event: "x402.pay", ok: false, traceId, error: "metadata-too-large", ms: Date.now() - startedAt });
       return sendJson(res, 400, { error: "metadata-too-large" });
     }
 
@@ -370,9 +444,13 @@ async function main() {
     if (payerKey) {
       const payerRate = payerLimiter.consume(payerKey);
       if (!payerRate.ok) {
+        counters.rateLimitedTotal += 1;
+        counters.rateLimitedByKind.payer += 1;
+        counters.payFailTotal += 1;
         logEvent({
           event: "x402.rateLimit",
           ok: false,
+          traceId,
           kind: "payer",
           payerAddress,
           clientIp,
@@ -386,40 +464,50 @@ async function main() {
 
     const policy = loadPolicy(policyFile);
     if (policy.policyId && policyId !== policy.policyId) {
-      logEvent({ event: "x402.pay", ok: false, error: "policy-id-mismatch", policyId, ms: Date.now() - startedAt });
+      counters.payFailTotal += 1;
+      logEvent({ event: "x402.pay", ok: false, traceId, error: "policy-id-mismatch", policyId, ms: Date.now() - startedAt });
       return sendJson(res, 403, { error: "policy-id-mismatch" });
     }
 
     if (requireSponsor) {
       if (!sponsorKey) {
-        logEvent({ event: "x402.pay", ok: false, error: "missing-sponsor", ms: Date.now() - startedAt });
+        counters.payFailTotal += 1;
+        logEvent({ event: "x402.pay", ok: false, traceId, error: "missing-sponsor", ms: Date.now() - startedAt });
         return sendJson(res, 400, { error: "missing-sponsor" });
       }
       if (!policy.sponsorAddress) {
-        logEvent({ event: "x402.pay", ok: false, error: "sponsor-not-configured", ms: Date.now() - startedAt });
+        counters.payFailTotal += 1;
+        logEvent({ event: "x402.pay", ok: false, traceId, error: "sponsor-not-configured", ms: Date.now() - startedAt });
         return sendJson(res, 403, { error: "sponsor-not-configured" });
       }
       if (String(policy.sponsorAddress).toLowerCase() !== sponsorKey) {
-        logEvent({ event: "x402.pay", ok: false, error: "sponsor-mismatch", sponsorAddress, ms: Date.now() - startedAt });
+        counters.payFailTotal += 1;
+        logEvent({ event: "x402.pay", ok: false, traceId, error: "sponsor-mismatch", sponsorAddress, ms: Date.now() - startedAt });
         return sendJson(res, 403, { error: "sponsor-mismatch" });
       }
     } else if (policy.sponsorAddress && sponsorKey && String(policy.sponsorAddress).toLowerCase() !== sponsorKey) {
-      logEvent({ event: "x402.pay", ok: false, error: "sponsor-mismatch", sponsorAddress, ms: Date.now() - startedAt });
+      counters.payFailTotal += 1;
+      logEvent({ event: "x402.pay", ok: false, traceId, error: "sponsor-mismatch", sponsorAddress, ms: Date.now() - startedAt });
       return sendJson(res, 403, { error: "sponsor-mismatch" });
     }
 
     const allow = allowedByPolicy(policy, url);
     if (!allow.ok) {
-      logEvent({ event: "x402.pay", ok: false, error: allow.reason, url, ms: Date.now() - startedAt });
+      counters.payFailTotal += 1;
+      logEvent({ event: "x402.pay", ok: false, traceId, error: allow.reason, url, ms: Date.now() - startedAt });
       return sendJson(res, 403, { error: allow.reason });
     }
 
     if (sponsorKey) {
       const sponsorRate = sponsorLimiter.consume(sponsorKey);
       if (!sponsorRate.ok) {
+        counters.rateLimitedTotal += 1;
+        counters.rateLimitedByKind.sponsor += 1;
+        counters.payFailTotal += 1;
         logEvent({
           event: "x402.rateLimit",
           ok: false,
+          traceId,
           kind: "sponsor",
           sponsorAddress,
           clientIp,
@@ -440,7 +528,8 @@ async function main() {
     if (policy.limits.maxAmountPerDay !== null) {
       const max = BigInt(String(policy.limits.maxAmountPerDay));
       if (dayTotal + amountInt > max) {
-        logEvent({ event: "x402.pay", ok: false, error: "daily-limit-exceeded", amount, day, ms: Date.now() - startedAt });
+        counters.payFailTotal += 1;
+        logEvent({ event: "x402.pay", ok: false, traceId, error: "daily-limit-exceeded", amount, day, ms: Date.now() - startedAt });
         return sendJson(res, 402, { error: "daily-limit-exceeded" });
       }
     }
@@ -472,9 +561,11 @@ async function main() {
     const receipt = { ...baseReceipt, receiptId, receiptUri: finalReceiptUri };
 
     writeJsonAtomic(path.join(receiptsDir, `${receiptId}.json`), receipt);
+    counters.payOkTotal += 1;
     logEvent({
       event: "x402.pay",
       ok: true,
+      traceId,
       receiptId,
       receiptUri: finalReceiptUri,
       amount,

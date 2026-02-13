@@ -11,6 +11,10 @@ function requireEnv(name) {
   return v;
 }
 
+function randomId() {
+  return `${Date.now()}-${process.pid}-${Math.random().toString(16).slice(2)}`;
+}
+
 function getArgValue(argv, key) {
   const i = argv.indexOf(key);
   if (i === -1) return undefined;
@@ -46,6 +50,31 @@ function atomicWriteFile(filePath, data) {
     } catch {}
     throw e;
   }
+}
+
+function rotateLogIfNeeded(filePath, maxBytes) {
+  if (!filePath || !maxBytes || maxBytes <= 0) return;
+  try {
+    const st = fs.statSync(filePath);
+    if (!st.isFile()) return;
+    if (st.size < maxBytes) return;
+    const rotatedPath = `${filePath}.rotated-${Date.now()}`;
+    fs.renameSync(filePath, rotatedPath);
+  } catch {}
+}
+
+function createLogger({ baseFields, logFile, logMaxBytes }) {
+  return (obj) => {
+    const lineObj = { ts: new Date().toISOString(), ...baseFields, ...obj };
+    try {
+      process.stdout.write(JSON.stringify(lineObj) + "\n");
+    } catch {}
+    if (!logFile) return;
+    try {
+      rotateLogIfNeeded(logFile, logMaxBytes);
+      fs.appendFileSync(logFile, JSON.stringify(lineObj) + "\n");
+    } catch {}
+  };
 }
 
 function readJsonRecovering(filePath, fallback) {
@@ -117,6 +146,11 @@ async function main() {
   const confirmations = BigInt(getArgValue(argv, "--confirmations") ?? process.env.INDEXER_CONFIRMATIONS ?? "0");
   const chunkSize = BigInt(getArgValue(argv, "--chunkSize") ?? process.env.INDEXER_CHUNK_SIZE ?? "2000");
 
+  const runId = getArgValue(argv, "--runId") ?? process.env.RUN_ID ?? randomId();
+  const logFile = getArgValue(argv, "--logFile") ?? process.env.INDEXER_LOG_FILE ?? null;
+  const logMaxBytes = Number(getArgValue(argv, "--logMaxBytes") ?? process.env.INDEXER_LOG_MAX_BYTES ?? "0");
+  const logEvent = createLogger({ baseFields: { service: "indexer", runId }, logFile, logMaxBytes });
+
   const publicClient = createPublicClient({
     chain: { id: chainId, name: "custom", nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 }, rpcUrls: { default: { http: [rpcUrl] } } },
     transport: http(rpcUrl)
@@ -138,6 +172,21 @@ async function main() {
         : 0n;
   const toBlockRaw = toBlockArg ? BigInt(toBlockArg) : safeToBlock;
   const toBlock = toBlockRaw <= safeToBlock ? toBlockRaw : safeToBlock;
+
+  logEvent({
+    event: "indexer.start",
+    ok: true,
+    chainId,
+    taskEscrow,
+    juryContract,
+    fromBlock: fromBlock.toString(),
+    toBlock: toBlock.toString(),
+    latestBlock: latestBlock.toString(),
+    confirmations: confirmations.toString(),
+    chunkSize: chunkSize.toString(),
+    cursorFile,
+    resume
+  });
 
   const taskEscrowAbi = [
     {
@@ -353,6 +402,7 @@ async function main() {
   if (fromBlock <= toBlock) {
     for (let start = fromBlock; start <= toBlock; start += chunkSize) {
       const end = start + chunkSize - 1n <= toBlock ? start + chunkSize - 1n : toBlock;
+      logEvent({ event: "indexer.scanChunk", ok: true, fromBlock: start.toString(), toBlock: end.toString() });
       const taskChunk = await publicClient.getLogs({ address: taskEscrow, fromBlock: start, toBlock: end });
       for (const log of taskChunk) ingestTaskEscrowLog(log);
       const juryChunk = await publicClient.getLogs({ address: juryContract, fromBlock: start, toBlock: end });
@@ -495,6 +545,7 @@ async function main() {
     alerts: state.alerts.length
   };
   process.stdout.write(JSON.stringify(summary) + "\n");
+  logEvent({ event: "indexer.done", ok: true, ...summary, cursorFile, lastProcessedBlock: toBlock.toString() });
 
   if (!serve) return;
 
@@ -535,6 +586,7 @@ async function main() {
   };
 
   const server = nodeHttp.createServer((req, res) => {
+    const traceId = req.headers["x-trace-id"] ? String(req.headers["x-trace-id"]) : randomId();
     const u = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
     const p = u.pathname;
 
@@ -542,33 +594,65 @@ async function main() {
       return sendJson(res, 200, { ok: true });
     }
 
+    if (req.method === "GET" && p === "/metrics") {
+      const cursorNow = readJsonRecovering(cursorFile, { lastProcessedBlock: "0" });
+      const metrics = {
+        ok: true,
+        service: "indexer",
+        runId,
+        digest: finalState.digest,
+        latestBlock: finalState.meta.latestBlock,
+        safeToBlock: finalState.meta.toBlock,
+        cursorFile,
+        lastProcessedBlock: cursorNow.lastProcessedBlock ?? "0",
+        tasks: Object.keys(finalState.tasks).length,
+        validations: Object.keys(finalState.validations).length,
+        agents: Object.keys(finalState.agents).length,
+        alerts: finalState.alerts.length
+      };
+      logEvent({ event: "indexer.http", ok: true, traceId, method: req.method, path: p, code: 200 });
+      return sendJson(res, 200, metrics);
+    }
+
     if (req.method === "GET" && p === "/state") {
+      logEvent({ event: "indexer.http", ok: true, traceId, method: req.method, path: p, code: 200 });
       return sendJson(res, 200, finalState);
     }
 
     if (req.method === "GET" && p === "/alerts") {
+      logEvent({ event: "indexer.http", ok: true, traceId, method: req.method, path: p, code: 200 });
       return sendJson(res, 200, { ok: true, alerts: finalState.alerts });
     }
 
     if (req.method === "GET" && p === "/tasks") {
+      logEvent({ event: "indexer.http", ok: true, traceId, method: req.method, path: p, code: 200 });
       return sendJson(res, 200, { ok: true, tasks: listTasks() });
     }
 
     if (req.method === "GET" && p.startsWith("/tasks/")) {
       const taskId = p.split("/").pop();
       const task = finalState.tasks[taskId];
-      if (!task) return sendJson(res, 404, { error: "not-found" });
+      if (!task) {
+        logEvent({ event: "indexer.http", ok: false, traceId, method: req.method, path: p, code: 404 });
+        return sendJson(res, 404, { error: "not-found" });
+      }
+      logEvent({ event: "indexer.http", ok: true, traceId, method: req.method, path: p, code: 200 });
       return sendJson(res, 200, { ok: true, task });
     }
 
     if (req.method === "GET" && p === "/validations") {
+      logEvent({ event: "indexer.http", ok: true, traceId, method: req.method, path: p, code: 200 });
       return sendJson(res, 200, { ok: true, validations: flattenValidations() });
     }
 
     if (req.method === "GET" && p.startsWith("/agents/")) {
       const agentId = p.split("/").pop();
       const agent = finalState.agents[agentId];
-      if (!agent) return sendJson(res, 404, { error: "not-found" });
+      if (!agent) {
+        logEvent({ event: "indexer.http", ok: false, traceId, method: req.method, path: p, code: 404 });
+        return sendJson(res, 404, { error: "not-found" });
+      }
+      logEvent({ event: "indexer.http", ok: true, traceId, method: req.method, path: p, code: 200 });
       return sendJson(res, 200, { ok: true, agent });
     }
 
@@ -576,6 +660,7 @@ async function main() {
       const agents = Object.keys(finalState.agents)
         .map((agentId) => ({ agentId, ...finalState.agents[agentId] }))
         .sort((a, b) => Number(BigInt(b.agentId) - BigInt(a.agentId)));
+      logEvent({ event: "indexer.http", ok: true, traceId, method: req.method, path: p, code: 200 });
       return sendJson(res, 200, { ok: true, agents });
     }
 
@@ -611,10 +696,12 @@ async function main() {
       return sendHtml(res, 200, html);
     }
 
+    logEvent({ event: "indexer.http", ok: false, traceId, method: req.method, path: p, code: 404 });
     return sendJson(res, 404, { error: "not-found" });
   });
 
   server.listen(port, () => {
+    logEvent({ event: "indexer.serve", ok: true, port });
     process.stdout.write(JSON.stringify({ ok: true, serve: true, port }) + "\n");
   });
 }

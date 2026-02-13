@@ -72,9 +72,33 @@ function parseBool(v, defaultValue) {
   throw new Error(`Invalid boolean: ${v}`);
 }
 
+function randomId() {
+  return `${Date.now()}-${process.pid}-${Math.random().toString(16).slice(2)}`;
+}
+
+let LOG_FILE = null;
+let LOG_MAX_BYTES = 0;
+let LOG_BASE_FIELDS = {};
+
+function rotateLogIfNeeded(filePath, maxBytes) {
+  if (!filePath || !maxBytes || maxBytes <= 0) return;
+  try {
+    const st = fs.statSync(filePath);
+    if (!st.isFile()) return;
+    if (st.size < maxBytes) return;
+    const rotatedPath = `${filePath}.rotated-${Date.now()}`;
+    fs.renameSync(filePath, rotatedPath);
+  } catch {}
+}
+
 function logEvent(obj) {
   try {
-    process.stdout.write(JSON.stringify({ ts: new Date().toISOString(), ...obj }) + "\n");
+    const lineObj = { ts: new Date().toISOString(), ...LOG_BASE_FIELDS, ...obj };
+    process.stdout.write(JSON.stringify(lineObj) + "\n");
+    if (LOG_FILE) {
+      rotateLogIfNeeded(LOG_FILE, LOG_MAX_BYTES);
+      fs.appendFileSync(LOG_FILE, JSON.stringify(lineObj) + "\n");
+    }
   } catch {}
 }
 
@@ -117,6 +141,11 @@ async function main() {
 
   const chainId = Number(getArgValue(argv, "--chainId") ?? process.env.CHAIN_ID ?? "1");
 
+  const runId = getArgValue(argv, "--runId") ?? process.env.RUN_ID ?? randomId();
+  LOG_FILE = getArgValue(argv, "--logFile") ?? process.env.ORCHESTRATOR_LOG_FILE ?? null;
+  LOG_MAX_BYTES = Number(getArgValue(argv, "--logMaxBytes") ?? process.env.ORCHESTRATOR_LOG_MAX_BYTES ?? "0");
+  LOG_BASE_FIELDS = { service: "orchestrator", mode, runId };
+
   const entryPoint = getArgValue(argv, "--entryPoint") ??
     process.env.ENTRYPOINT_ADDRESS ??
     "0x0000000071727De22E5E9d8BAf0edAc6f37da032";
@@ -127,6 +156,8 @@ async function main() {
     chain: { id: chainId, name: "custom", nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 }, rpcUrls: { default: { http: [rpcUrl] } } },
     transport: http(rpcUrl)
   });
+
+  logEvent({ event: "orchestrator.start", ok: true, chainId, dryRun });
 
   if (mode === "watchEvidence") {
     const once = parseBool(getArgValue(argv, "--once"), false);
@@ -151,7 +182,8 @@ async function main() {
       onLogs: (logs) => {
         for (const log of logs) {
           const args = log.args ?? {};
-          logEvent({ event: "orchestrator.evidenceSubmitted", mode, address: taskEscrow, log: { ...log, args } });
+          const traceId = String(args.taskId ?? randomId());
+          logEvent({ event: "orchestrator.evidenceSubmitted", ok: true, traceId, mode, address: taskEscrow, log: { ...log, args } });
           if (once) {
             unwatch();
             process.exit(0);
@@ -466,6 +498,8 @@ async function main() {
     const processTask = async ({ taskId, source, blockNumber }) => {
       if (!taskId) return;
       const taskIdKey = String(taskId);
+      const traceId = taskIdKey;
+      const logTaskEvent = (obj) => logEvent({ traceId, taskId, ...obj });
       state.tasks[taskIdKey] = state.tasks[taskIdKey] ?? { taskId: taskIdKey, attempts: 0, done: false, lastError: null };
 
       const entry = state.tasks[taskIdKey];
@@ -489,7 +523,7 @@ async function main() {
         if (status >= 5) {
           entry.lastError = null;
           saveState();
-          logEvent({ event: "orchestrator.skipDoneTask", mode, taskId, status, source });
+          logTaskEvent({ event: "orchestrator.skipDoneTask", ok: true, mode, status, source });
           if (!myShopItemsAddress || !rewardItemId || entry.rewardTriggered === true) {
             entry.done = true;
             saveState();
@@ -506,20 +540,20 @@ async function main() {
         if (shouldAccept) {
           const data = encodeFunctionData({ abi: taskEscrowAbi, functionName: "acceptTask", args: [taskId] });
           const txHash = await sendTx({ to: taskEscrow, data, wallet: walletClient });
-          logEvent({ event: "orchestrator.acceptTask", mode, taskId, txHash, source });
+          logTaskEvent({ event: "orchestrator.acceptTask", ok: true, mode, txHash, source });
         }
 
         if (shouldSubmit) {
           const data = encodeFunctionData({ abi: taskEscrowAbi, functionName: "submitWork", args: [taskId, evidenceUri] });
           const txHash = await sendTx({ to: taskEscrow, data, wallet: walletClient });
-          logEvent({ event: "orchestrator.submitWork", mode, taskId, evidenceUri, txHash, source });
+          logTaskEvent({ event: "orchestrator.submitWork", ok: true, mode, evidenceUri, txHash, source });
 
           if (!receiptUri && x402ProxyUrl && BigInt(x402TaskAmount) > 0n) {
             try {
               receiptUri = await x402Pay({ url: evidenceUri, method: "EVIDENCE", amount: x402TaskAmount, payerAddress: account.address });
-              logEvent({ event: "orchestrator.x402Pay", mode, kind: "task", receiptUri });
+              logTaskEvent({ event: "orchestrator.x402Pay", ok: true, mode, kind: "task", receiptUri });
             } catch (e) {
-              logEvent({ event: "orchestrator.x402PayFailed", mode, kind: "task", error: String(e) });
+              logTaskEvent({ event: "orchestrator.x402PayFailed", ok: false, mode, kind: "task", error: String(e) });
             }
           }
 
@@ -527,7 +561,7 @@ async function main() {
             const receiptId = keccak256(toHex(receiptUri));
             const linkReceiptData = encodeFunctionData({ abi: taskEscrowAbi, functionName: "linkReceipt", args: [taskId, receiptId, receiptUri] });
             const linkReceiptTxHash = await sendTx({ to: taskEscrow, data: linkReceiptData, wallet: walletClient });
-            logEvent({ event: "orchestrator.linkReceipt", mode, taskId, receiptId, receiptUri, txHash: linkReceiptTxHash });
+            logTaskEvent({ event: "orchestrator.linkReceipt", ok: true, mode, receiptId, receiptUri, txHash: linkReceiptTxHash });
           }
 
           if (validationMinCount > 0n && String(task.community).toLowerCase() === communityAccount.address.toLowerCase()) {
@@ -537,10 +571,10 @@ async function main() {
               args: [taskId, validationTag, validationMinCount, validationMinAvg, validationMinUnique]
             });
             const setReqTxHash = await sendTx({ to: taskEscrow, data: setReqData, wallet: communityWalletClient });
-            logEvent({
+            logTaskEvent({
               event: "orchestrator.setTaskValidationRequirementWithValidators",
+              ok: true,
               mode,
-              taskId,
               tag: validationTag,
               minCount: validationMinCount.toString(),
               minAvg: validationMinAvg,
@@ -631,9 +665,9 @@ async function main() {
                 const reqTxHash = await sendTx({ to: juryContractAddress, data: reqData, wallet: communityWalletClient });
                 entry.validationRequestSent = true;
                 saveState();
-                logEvent({ event: "orchestrator.validationRequest", mode, requestHash, requestUri: validationRequestUri, txHash: reqTxHash });
+                logTaskEvent({ event: "orchestrator.validationRequest", ok: true, mode, requestHash, requestUri: validationRequestUri, txHash: reqTxHash });
               } catch (e) {
-                logEvent({ event: "orchestrator.validationRequestFailed", mode, requestHash, error: String(e) });
+                logTaskEvent({ event: "orchestrator.validationRequestFailed", ok: false, mode, requestHash, error: String(e) });
               }
             }
 
@@ -706,9 +740,9 @@ async function main() {
               try {
                 await rpcRequest("evm_increaseTime", [Number(delta)]);
                 await rpcRequest("evm_mine", []);
-                logEvent({ event: "orchestrator.fastForward", mode, seconds: Number(delta) });
+                logTaskEvent({ event: "orchestrator.fastForward", ok: true, mode, seconds: Number(delta) });
               } catch (e) {
-                logEvent({ event: "orchestrator.fastForwardFailed", mode, error: String(e) });
+                logTaskEvent({ event: "orchestrator.fastForwardFailed", ok: false, mode, error: String(e) });
               }
             }
 
@@ -717,16 +751,16 @@ async function main() {
               try {
                 satisfied = await publicClient.readContract({ address: taskEscrow, abi: taskEscrowAbi, functionName: "validationsSatisfied", args: [taskId] });
               } catch {}
-              logEvent({ event: "orchestrator.manualFinalizeRequired", mode, taskId, challengeDeadline: refreshed.challengeDeadline, validationsSatisfied: satisfied });
+              logTaskEvent({ event: "orchestrator.manualFinalizeRequired", ok: true, mode, challengeDeadline: refreshed.challengeDeadline, validationsSatisfied: satisfied });
               return;
             }
 
             const finalizeData = encodeFunctionData({ abi: taskEscrowAbi, functionName: "finalizeTask", args: [taskId] });
             try {
               const finalizeTxHash = await sendTx({ to: taskEscrow, data: finalizeData, wallet: walletClient });
-              logEvent({ event: "orchestrator.finalizeTask", mode, taskId, txHash: finalizeTxHash });
+              logTaskEvent({ event: "orchestrator.finalizeTask", ok: true, mode, txHash: finalizeTxHash });
             } catch (e) {
-              logEvent({ event: "orchestrator.finalizeFailed", mode, taskId, error: String(e) });
+              logTaskEvent({ event: "orchestrator.finalizeFailed", ok: false, mode, error: String(e) });
             }
           }
         }
@@ -782,10 +816,10 @@ async function main() {
             entry.rewardTriggered = true;
             entry.rewardTxHash = rewardTxHash;
             saveState();
-            logEvent({
+            logTaskEvent({
               event: "orchestrator.rewardTriggered",
+              ok: true,
               mode,
-              taskId,
               myShopItemsAddress,
               itemId: rewardItemId.toString(),
               quantity: rewardQuantity.toString(),
@@ -797,7 +831,7 @@ async function main() {
             entry.rewardTriggered = false;
             entry.rewardError = String(e);
             saveState();
-            logEvent({ event: "orchestrator.rewardFailed", mode, taskId, error: String(e) });
+            logTaskEvent({ event: "orchestrator.rewardFailed", ok: false, mode, error: String(e) });
           }
         }
 
@@ -810,7 +844,7 @@ async function main() {
       } catch (e) {
         entry.lastError = String(e);
         saveState();
-        logEvent({ event: "orchestrator.taskFailed", mode, taskId, source, error: String(e) });
+        logTaskEvent({ event: "orchestrator.taskFailed", ok: false, mode, source, error: String(e) });
       }
     };
 
