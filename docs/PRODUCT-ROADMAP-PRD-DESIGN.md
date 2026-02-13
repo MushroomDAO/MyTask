@@ -1,6 +1,6 @@
 # MyTask Product Roadmap + PRD + Technical Design (Onchain Tasks + Agent Economics)
 
-Last updated: 2026-02-12
+Last updated: 2026-02-13
 
 ## 0) What I reviewed in `docs/` (inputs to this doc)
 
@@ -47,12 +47,16 @@ Missing for a complete “agent economy” product:
 
 ### 3.1 Validator vs Jury (role boundaries)
 
-- **Validator** is an abstract role: any entity that can produce a verifiable “validation response” for a request (human expert, oracle, ZK/TEE verifier, DAO committee, automated judge, etc.). The output is a signed/onchain record that can be aggregated into reputation (ERC-8004 semantics: request → response + tag + score).
-- **Jury** is a concrete mechanism to implement validation: a juror set with staking + voting + consensus rules that yields one final validation response. Jury can be treated as “one type of validator”, optimized for subjective or dispute-prone tasks.
-- **Not duplicate if we unify them**: the recommended model is “many validators exist; Jury is one validator type”. Task settlement can require either:
+- **Validator** is an abstract role: any entity that can produce a validation result that can be audited/attributed (human expert, oracle, ZK/TEE verifier, DAO committee, automated judge, etc.). The output is a signed/onchain record that can be aggregated into reputation (ERC-8004 semantics: request → response + tag + score).
+- **Jury** is one validator implementation optimized for disputes and subjective judgments: a juror set with staking + voting + consensus rules that yields one final result. Jury is slower and more expensive, but supports strong accountability (e.g., slashing) and “final decision” semantics.
+- **Not duplicate**: Validator is the interface/capability layer; Jury is a plugin implementation. The recommended model is “many validators exist; Jury is one validator type”. Task settlement can require either:
   - one Jury result, or
   - N independent validators, or
   - a hybrid (e.g., automated checks first, jury only on conflicts).
+  
+- **Rule of thumb**:
+  - Objective / automatable / provable: prefer Validator (automation/ZK/TEE/webproof).
+  - Subjective / dispute-prone / needs final arbitration: prefer Jury.
 
 ### 3.2 Taskor vs Agent (identity and wallets)
 
@@ -128,7 +132,7 @@ Missing for a complete “agent economy” product:
 **Onchain**
 
 - `TaskEscrow` (MyTask): holds task funds, manages task lifecycle, settles payouts.
-- `JuryContract` (MyTask): juror staking/registration + jury tasks; also aligns well with the ERC-8004 Validation Registry interface.
+- `JuryContract` (MyTask): juror staking/registration + jury tasks; as a validator implementation, can be adapted to ERC-8004 Validation Registry semantics.
 - Identity / roles: MySBT + Registry/role system (cross-repo per `TotalSolution.md`).
 
 **Offchain**
