@@ -76,6 +76,23 @@ contract JuryContractTest is Test {
         jury.registerJuror(MIN_STAKE - 1);
     }
 
+    function test_JurorRegistrationRequiresRoleWhenEnabled() public {
+        jury.setRequireJurorRole(true);
+
+        vm.prank(juror1);
+        vm.expectRevert("Missing role");
+        jury.registerJuror(MIN_STAKE);
+
+        jury.grantRole(jury.ROLE_JUROR(), juror1);
+
+        vm.prank(juror1);
+        jury.registerJuror(MIN_STAKE);
+
+        (bool isActive, uint256 stake) = jury.isActiveJuror(juror1);
+        assertTrue(isActive);
+        assertEq(stake, MIN_STAKE);
+    }
+
     function test_CreateTask() public {
         IJuryContract.TaskParams memory params = IJuryContract.TaskParams({
             agentId: AGENT_ID,
@@ -304,6 +321,22 @@ contract JuryContractTest is Test {
         vm.prank(taskCreator);
         vm.expectRevert("Invalid agentId");
         jury.validationRequest(address(jury), 999, "ipfs://request", bytes32(0));
+    }
+
+    function test_ValidationRequestRequiresRoleWhenEnabled() public {
+        jury.setRequireValidationRequesterRole(true);
+
+        vm.prank(taskCreator);
+        vm.expectRevert("Missing role");
+        jury.validationRequest(address(jury), AGENT_ID, "ipfs://request", bytes32(0));
+
+        jury.grantRole(jury.ROLE_VALIDATION_REQUESTER(), taskCreator);
+
+        vm.prank(taskCreator);
+        jury.validationRequest(address(jury), AGENT_ID, "ipfs://request", bytes32(0));
+
+        bytes32[] memory requests = jury.getValidatorRequests(address(jury));
+        assertEq(requests.length, 1);
     }
 
     function test_GetSummaryFiltersByTagAndValidator() public {

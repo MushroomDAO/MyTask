@@ -49,6 +49,10 @@ contract JuryContract is IJuryContract {
     uint256 private _taskCounter;
 
     address public admin;
+    bytes32 public constant ROLE_JUROR = keccak256("ROLE_JUROR");
+    bytes32 public constant ROLE_VALIDATION_REQUESTER = keccak256("ROLE_VALIDATION_REQUESTER");
+    bool public requireJurorRole;
+    bool public requireValidationRequesterRole;
 
     // ====================================
     // Mappings
@@ -139,6 +143,14 @@ contract JuryContract is IJuryContract {
         require(newAdmin != address(0), "Invalid admin");
         emit AdminUpdated(admin, newAdmin);
         admin = newAdmin;
+    }
+
+    function setRequireJurorRole(bool enabled) external onlyAdmin {
+        requireJurorRole = enabled;
+    }
+
+    function setRequireValidationRequesterRole(bool enabled) external onlyAdmin {
+        requireValidationRequesterRole = enabled;
     }
 
     function grantRole(bytes32 role, address account) external onlyAdmin {
@@ -327,6 +339,9 @@ contract JuryContract is IJuryContract {
     function registerJuror(uint256 stakeAmount) external {
         require(stakeAmount >= minJurorStake, "Stake too low");
         require(!_jurorActive[msg.sender], "Already registered");
+        if (requireJurorRole) {
+            require(_roles[ROLE_JUROR][msg.sender], "Missing role");
+        }
 
         // Transfer stake
         require(IERC20(stakingToken).transferFrom(msg.sender, address(this), stakeAmount), "Stake transfer failed");
@@ -415,6 +430,9 @@ contract JuryContract is IJuryContract {
         bytes32 requestHash
     ) external {
         require(validatorAddress == address(this), "Unsupported validator");
+        if (requireValidationRequesterRole) {
+            require(_roles[ROLE_VALIDATION_REQUESTER][msg.sender], "Missing role");
+        }
         if (mySBT.code.length > 0) {
             require(_agentIdExists(agentId), "Invalid agentId");
         }
