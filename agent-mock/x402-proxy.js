@@ -157,6 +157,15 @@ function parsePositiveInt(v, fallback) {
   return Math.floor(n);
 }
 
+function parseBool(v, fallback) {
+  if (v === undefined || v === null || v === "") return fallback;
+  if (v === true || v === false) return v;
+  const s = String(v).toLowerCase();
+  if (s === "true") return true;
+  if (s === "false") return false;
+  return fallback;
+}
+
 function createWindowCounter({ windowMs, limit }) {
   const buckets = new Map();
   const consume = (key) => {
@@ -182,12 +191,15 @@ async function main() {
   const port = Number(getArgValue(argv, "--port") ?? process.env.X402_PROXY_PORT ?? "8787");
   const storeDir = getArgValue(argv, "--storeDir") ?? process.env.X402_STORE_DIR ?? path.join(process.cwd(), "receipts");
   const policyFile = getArgValue(argv, "--policy") ?? process.env.X402_POLICY_FILE ?? path.join(process.cwd(), "sponsor-policy.json");
+  const requireSponsor = parseBool(process.env.X402_REQUIRE_SPONSOR, false);
   const maxBodyBytes = parsePositiveInt(process.env.X402_MAX_BODY_BYTES, 64 * 1024);
   const rateWindowMs = parsePositiveInt(process.env.X402_RATE_WINDOW_MS, 60_000);
   const rateIpPerWindow = parsePositiveInt(process.env.X402_RATE_LIMIT_IP, 60);
   const ratePayerPerWindow = parsePositiveInt(process.env.X402_RATE_LIMIT_PAYER, 120);
+  const rateSponsorPerWindow = parsePositiveInt(process.env.X402_RATE_LIMIT_SPONSOR, 240);
   const ipLimiter = createWindowCounter({ windowMs: rateWindowMs, limit: rateIpPerWindow });
   const payerLimiter = createWindowCounter({ windowMs: rateWindowMs, limit: ratePayerPerWindow });
+  const sponsorLimiter = createWindowCounter({ windowMs: rateWindowMs, limit: rateSponsorPerWindow });
 
   ensureDir(storeDir);
   const receiptsDir = path.join(storeDir, "items");
@@ -352,8 +364,11 @@ async function main() {
       return sendJson(res, 400, { error: "metadata-too-large" });
     }
 
-    if (payerAddress) {
-      const payerRate = payerLimiter.consume(String(payerAddress).toLowerCase());
+    const payerKey = payerAddress ? String(payerAddress).toLowerCase() : null;
+    const sponsorKey = sponsorAddress ? String(sponsorAddress).toLowerCase() : null;
+
+    if (payerKey) {
+      const payerRate = payerLimiter.consume(payerKey);
       if (!payerRate.ok) {
         logEvent({
           event: "x402.rateLimit",
@@ -374,7 +389,21 @@ async function main() {
       logEvent({ event: "x402.pay", ok: false, error: "policy-id-mismatch", policyId, ms: Date.now() - startedAt });
       return sendJson(res, 403, { error: "policy-id-mismatch" });
     }
-    if (policy.sponsorAddress && sponsorAddress && String(policy.sponsorAddress).toLowerCase() !== String(sponsorAddress).toLowerCase()) {
+
+    if (requireSponsor) {
+      if (!sponsorKey) {
+        logEvent({ event: "x402.pay", ok: false, error: "missing-sponsor", ms: Date.now() - startedAt });
+        return sendJson(res, 400, { error: "missing-sponsor" });
+      }
+      if (!policy.sponsorAddress) {
+        logEvent({ event: "x402.pay", ok: false, error: "sponsor-not-configured", ms: Date.now() - startedAt });
+        return sendJson(res, 403, { error: "sponsor-not-configured" });
+      }
+      if (String(policy.sponsorAddress).toLowerCase() !== sponsorKey) {
+        logEvent({ event: "x402.pay", ok: false, error: "sponsor-mismatch", sponsorAddress, ms: Date.now() - startedAt });
+        return sendJson(res, 403, { error: "sponsor-mismatch" });
+      }
+    } else if (policy.sponsorAddress && sponsorKey && String(policy.sponsorAddress).toLowerCase() !== sponsorKey) {
       logEvent({ event: "x402.pay", ok: false, error: "sponsor-mismatch", sponsorAddress, ms: Date.now() - startedAt });
       return sendJson(res, 403, { error: "sponsor-mismatch" });
     }
@@ -383,6 +412,23 @@ async function main() {
     if (!allow.ok) {
       logEvent({ event: "x402.pay", ok: false, error: allow.reason, url, ms: Date.now() - startedAt });
       return sendJson(res, 403, { error: allow.reason });
+    }
+
+    if (sponsorKey) {
+      const sponsorRate = sponsorLimiter.consume(sponsorKey);
+      if (!sponsorRate.ok) {
+        logEvent({
+          event: "x402.rateLimit",
+          ok: false,
+          kind: "sponsor",
+          sponsorAddress,
+          clientIp,
+          resetMs: sponsorRate.resetMs,
+          ms: Date.now() - startedAt
+        });
+        res.writeHead(429, { "content-type": "application/json", "retry-after": String(Math.ceil(sponsorRate.resetMs / 1000)) });
+        return res.end(JSON.stringify({ error: "rate-limited", kind: "sponsor" }));
+      }
     }
 
     const accounting = loadAccounting();
@@ -400,13 +446,13 @@ async function main() {
     }
 
     accounting.days[day].total = (dayTotal + amountInt).toString();
-    if (sponsorAddress) {
-      const cur = BigInt(accounting.days[day].bySponsor[sponsorAddress] ?? "0");
-      accounting.days[day].bySponsor[sponsorAddress] = (cur + amountInt).toString();
+    if (sponsorKey) {
+      const cur = BigInt(accounting.days[day].bySponsor[sponsorKey] ?? "0");
+      accounting.days[day].bySponsor[sponsorKey] = (cur + amountInt).toString();
     }
-    if (payerAddress) {
-      const cur = BigInt(accounting.days[day].byPayer[payerAddress] ?? "0");
-      accounting.days[day].byPayer[payerAddress] = (cur + amountInt).toString();
+    if (payerKey) {
+      const cur = BigInt(accounting.days[day].byPayer[payerKey] ?? "0");
+      accounting.days[day].byPayer[payerKey] = (cur + amountInt).toString();
     }
     writeJsonAtomic(accountingPath, accounting);
 
