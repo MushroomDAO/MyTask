@@ -78,6 +78,36 @@ function randomId() {
   return `${Date.now()}-${process.pid}-${Math.random().toString(16).slice(2)}`;
 }
 
+function stableStringify(v) {
+  if (v === null) return "null";
+  const t = typeof v;
+  if (t === "string") return JSON.stringify(v);
+  if (t === "number") return Number.isFinite(v) ? String(v) : "null";
+  if (t === "boolean") return v ? "true" : "false";
+  if (t === "bigint") return JSON.stringify(v.toString());
+  if (Array.isArray(v)) return `[${v.map((x) => stableStringify(x)).join(",")}]`;
+  if (t === "object") {
+    const keys = Object.keys(v).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(v[k])}`).join(",")}}`;
+  }
+  return "null";
+}
+
+function deriveErc8004RequestHash({ chainId, taskId, agentId, validatorAddress, tag, requestUri }) {
+  const bytes = encodeAbiParameters(
+    [
+      { name: "chainId", type: "uint256" },
+      { name: "taskId", type: "bytes32" },
+      { name: "agentId", type: "uint256" },
+      { name: "validatorAddress", type: "address" },
+      { name: "tag", type: "bytes32" },
+      { name: "requestUri", type: "string" }
+    ],
+    [BigInt(chainId), taskId, BigInt(agentId), validatorAddress, tag, requestUri]
+  );
+  return keccak256(bytes);
+}
+
 let LOG_FILE = null;
 let LOG_MAX_BYTES = 0;
 let LOG_BASE_FIELDS = {};
@@ -709,9 +739,28 @@ async function main() {
           const requestHash =
             getArgValue(argv, "--requestHash") ??
             process.env.VALIDATION_REQUEST_HASH ??
-            keccak256(toHex(`${taskId}:${validationTag}:${validationRequestUri}`));
+            deriveErc8004RequestHash({
+              chainId,
+              taskId,
+              agentId,
+              validatorAddress: juryContractAddress,
+              tag: validationTag,
+              requestUri: validationRequestUri
+            });
 
           entry.requestHash = entry.requestHash ?? requestHash;
+          entry.validation = entry.validation ?? {};
+          entry.validation.request = {
+            schema: "aastar.erc8004.validationRequest@v1",
+            chainId: String(chainId),
+            taskId,
+            agentId: agentId.toString(),
+            validatorAddress: juryContractAddress,
+            tag: validationTag,
+            requestUri: validationRequestUri,
+            requestHash
+          };
+          entry.validation.request.canonical = stableStringify(entry.validation.request);
           saveState();
 
           if (validationMinCount > 0n) {
@@ -792,6 +841,20 @@ async function main() {
                 try {
                   const respTxHash = await sendTx({ to: juryContractAddress, data: respData, wallet: validatorWalletClient });
                   logEvent({ event: "orchestrator.validationResponse", mode, requestHash, score: validationScore, responseUri: validationResponseUri, tag: validationTag, txHash: respTxHash });
+                  entry.validation = entry.validation ?? {};
+                  entry.validation.response = {
+                    schema: "aastar.erc8004.validationResponse@v1",
+                    chainId: String(chainId),
+                    taskId,
+                    agentId: agentId.toString(),
+                    validatorAddress: validatorAccount.address,
+                    tag: validationTag,
+                    response: Number(validationScore),
+                    requestHash,
+                    responseUri: validationResponseUri
+                  };
+                  entry.validation.response.canonical = stableStringify(entry.validation.response);
+                  saveState();
                 } catch (e) {
                   logEvent({ event: "orchestrator.validationResponseFailed", mode, requestHash, error: String(e) });
                 }

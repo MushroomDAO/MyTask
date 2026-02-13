@@ -405,6 +405,18 @@ async function main() {
     }
   };
 
+  const getValidationArtifacts = (requestHash) => {
+    const v = state.validations[requestHash];
+    if (!v || !Array.isArray(v.events)) return { requestUri: null, responseUri: null };
+    let requestUri = null;
+    let responseUri = null;
+    for (const e of v.events) {
+      if (e?.name === "ValidationRequest" && e?.args?.requestUri) requestUri = e.args.requestUri;
+      if (e?.name === "ValidationResponse" && e?.args?.responseUri) responseUri = e.args.responseUri;
+    }
+    return { requestUri, responseUri };
+  };
+
   const rewardActionAbi = [
     {
       type: "event",
@@ -531,6 +543,7 @@ async function main() {
         functionName: "getValidationReceipts",
         args: [requestHash]
       });
+      const artifacts = getValidationArtifacts(requestHash);
       perTaskValidations.push({
         requestHash,
         validatorAddress: status[0],
@@ -538,6 +551,8 @@ async function main() {
         response: status[2],
         tag: status[3],
         lastUpdate: status[4].toString(),
+        requestUri: artifacts.requestUri,
+        responseUri: artifacts.responseUri,
         receipts: validationReceipts
       });
 
