@@ -278,7 +278,7 @@ async function main() {
     return;
   }
 
-  if (mode !== "linkJuryValidation" && mode !== "linkReceipt") {
+  if (mode !== "linkJuryValidation" && mode !== "linkReceipt" && mode !== "linkValidationReceipt") {
     throw new Error(`Unsupported mode: ${mode}`);
   }
 
@@ -289,14 +289,27 @@ async function main() {
   const operator = getArgValue(argv, "--operator") ?? requireEnv("OPERATOR_ADDRESS");
   const aaAccount = getArgValue(argv, "--aaAccount") ?? requireEnv("AA_ACCOUNT_ADDRESS");
 
-  const taskId = getArgValue(argv, "--taskId") ?? requireEnv("TASK_ID");
+  const taskId = mode === "linkValidationReceipt" ? undefined : getArgValue(argv, "--taskId") ?? requireEnv("TASK_ID");
   const juryTaskHash =
     mode === "linkJuryValidation" ? getArgValue(argv, "--juryTaskHash") ?? requireEnv("JURY_TASK_HASH") : undefined;
+  const requestHash =
+    mode === "linkValidationReceipt"
+      ? getArgValue(argv, "--requestHash") ?? requireEnv("VALIDATION_REQUEST_HASH")
+      : undefined;
+  const juryContractAddress =
+    mode === "linkValidationReceipt"
+      ? getArgValue(argv, "--juryContract") ?? requireEnv("JURY_CONTRACT_ADDRESS")
+      : undefined;
   const receiptUri =
-    mode === "linkReceipt" ? getArgValue(argv, "--receiptUri") ?? requireEnv("RECEIPT_URI") : undefined;
-  const receiptIdRaw = mode === "linkReceipt" ? getArgValue(argv, "--receiptId") ?? process.env.RECEIPT_ID : undefined;
+    mode === "linkReceipt" || mode === "linkValidationReceipt"
+      ? getArgValue(argv, "--receiptUri") ?? requireEnv("RECEIPT_URI")
+      : undefined;
+  const receiptIdRaw =
+    mode === "linkReceipt" || mode === "linkValidationReceipt"
+      ? getArgValue(argv, "--receiptId") ?? process.env.RECEIPT_ID
+      : undefined;
   const receiptId =
-    mode === "linkReceipt"
+    mode === "linkReceipt" || mode === "linkValidationReceipt"
       ? receiptIdRaw
         ? receiptIdRaw.startsWith("0x")
           ? receiptIdRaw
@@ -326,6 +339,15 @@ async function main() {
     {
       type: "function",
       name: "linkReceipt",
+      stateMutability: "nonpayable",
+      inputs: [{ type: "bytes32" }, { type: "bytes32" }, { type: "string" }],
+      outputs: []
+    }
+  ];
+  const juryAbi = [
+    {
+      type: "function",
+      name: "linkReceiptToValidation",
       stateMutability: "nonpayable",
       inputs: [{ type: "bytes32" }, { type: "bytes32" }, { type: "string" }],
       outputs: []
@@ -366,16 +388,23 @@ async function main() {
           functionName: "linkJuryValidation",
           args: [taskId, juryTaskHash]
         })
-      : encodeFunctionData({
-          abi: taskEscrowAbi,
-          functionName: "linkReceipt",
-          args: [taskId, receiptId, receiptUri]
-        });
+      : mode === "linkReceipt"
+        ? encodeFunctionData({
+            abi: taskEscrowAbi,
+            functionName: "linkReceipt",
+            args: [taskId, receiptId, receiptUri]
+          })
+        : encodeFunctionData({
+            abi: juryAbi,
+            functionName: "linkReceiptToValidation",
+            args: [requestHash, receiptId, receiptUri]
+          });
 
+  const target = mode === "linkValidationReceipt" ? juryContractAddress : taskEscrow;
   const callData = encodeFunctionData({
     abi: aaAbi,
     functionName: "execute",
-    args: [taskEscrow, 0n, linkData]
+    args: [target, 0n, linkData]
   });
 
   const accountGasLimits = concat([
