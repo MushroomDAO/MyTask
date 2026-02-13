@@ -464,6 +464,16 @@ contract JuryContract is IJuryContract {
         emit ValidationRequest(validatorAddress, agentId, requestUri, taskHash);
     }
 
+    function deriveValidationRequestHash(
+        bytes32 taskId,
+        uint256 agentId,
+        address validatorAddress,
+        bytes32 tag,
+        string calldata requestUri
+    ) external view returns (bytes32) {
+        return keccak256(abi.encode(block.chainid, taskId, agentId, validatorAddress, tag, requestUri));
+    }
+
     /// @notice Submit validation response (ERC-8004)
     function validationResponse(
         bytes32 requestHash,

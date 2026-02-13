@@ -199,4 +199,12 @@ interface IJuryContract is IERC8004ValidationRegistry {
      * @return token Staking token address
      */
     function getStakingToken() external view returns (address token);
+
+    function deriveValidationRequestHash(
+        bytes32 taskId,
+        uint256 agentId,
+        address validatorAddress,
+        bytes32 tag,
+        string calldata requestUri
+    ) external view returns (bytes32);
 }

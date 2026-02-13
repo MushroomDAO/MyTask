@@ -247,6 +247,15 @@ contract JuryContractTest is Test {
         assertEq(response, 100);
     }
 
+    function test_DeriveValidationRequestHash() public {
+        bytes32 taskId = keccak256("task-id");
+        bytes32 tag = bytes32("QUALITY");
+        string memory requestUri = "ipfs://request";
+        bytes32 expected = keccak256(abi.encode(block.chainid, taskId, AGENT_ID, address(jury), tag, requestUri));
+        bytes32 actual = jury.deriveValidationRequestHash(taskId, AGENT_ID, address(jury), tag, requestUri);
+        assertEq(actual, expected);
+    }
+
     function test_TagRoleGatesValidationResponse() public {
         bytes32 tag = bytes32("TAG");
         bytes32 role = keccak256("ROLE_TAG_VALIDATOR");
