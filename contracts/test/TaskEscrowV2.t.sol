@@ -305,6 +305,51 @@ contract TaskEscrowV2Test is Test {
         assertEq(uint256(task.status), uint256(TaskEscrowV2.TaskStatus.Finalized));
     }
 
+    function test_FinalizeTask_RevertWhenUniqueValidatorsNotSatisfied() public {
+        bytes32 taskId = _createTask();
+
+        vm.prank(taskor);
+        escrow.acceptTask(taskId);
+
+        vm.prank(taskor);
+        escrow.submitWork(taskId, "ipfs://evidence");
+
+        bytes32 tag = bytes32("TAG");
+        vm.prank(community);
+        escrow.setTaskValidationRequirementWithValidators(taskId, tag, 2, 50, 2);
+
+        bytes32 requestHash1 = keccak256("req-1");
+        bytes32 requestHash2 = keccak256("req-2");
+
+        vm.prank(community);
+        jury.validationRequest(address(jury), 1, "ipfs://req-1", requestHash1);
+        vm.prank(community);
+        jury.validationRequest(address(jury), 1, "ipfs://req-2", requestHash2);
+
+        vm.prank(community);
+        escrow.addTaskValidationRequest(taskId, requestHash1);
+        vm.prank(community);
+        escrow.addTaskValidationRequest(taskId, requestHash2);
+
+        vm.prank(address(0xBEEF));
+        jury.validationResponse(requestHash1, 80, "ipfs://resp-1", bytes32(0), tag);
+        vm.prank(address(0xBEEF));
+        jury.validationResponse(requestHash2, 80, "ipfs://resp-2", bytes32(0), tag);
+
+        vm.warp(block.timestamp + 4 days);
+
+        vm.expectRevert(TaskEscrowV2.ValidationsNotSatisfied.selector);
+        escrow.finalizeTask(taskId);
+
+        vm.prank(address(0xCAFE));
+        jury.validationResponse(requestHash2, 80, "ipfs://resp-3", bytes32(0), tag);
+
+        escrow.finalizeTask(taskId);
+
+        TaskEscrowV2.Task memory task = escrow.getTask(taskId);
+        assertEq(uint256(task.status), uint256(TaskEscrowV2.TaskStatus.Finalized));
+    }
+
     // ====================================
     // Early Approval Tests
     // ====================================
@@ -442,6 +487,85 @@ contract TaskEscrowV2Test is Test {
         vm.prank(address(0xBEEF));
         vm.expectRevert(TaskEscrowV2.NotParticipant.selector);
         escrow.linkReceipt(taskId, keccak256("receipt-2"), "ipfs://receipt-2");
+    }
+
+    function test_TaskPolicy_ReceiptLimit() public {
+        bytes32 taskId = _createTask();
+
+        vm.prank(taskor);
+        escrow.acceptTask(taskId);
+
+        vm.prank(community);
+        escrow.setTaskPolicy(taskId, 1, 0);
+
+        vm.prank(taskor);
+        escrow.linkReceipt(taskId, keccak256("r-1"), "ipfs://r-1");
+
+        vm.prank(taskor);
+        vm.expectRevert(TaskEscrowV2.PolicyViolation.selector);
+        escrow.linkReceipt(taskId, keccak256("r-2"), "ipfs://r-2");
+    }
+
+    function test_TaskPolicy_ValidationRequestLimit() public {
+        bytes32 taskId = _createTask();
+
+        vm.prank(taskor);
+        escrow.acceptTask(taskId);
+
+        vm.prank(community);
+        escrow.setTaskPolicy(taskId, 0, 1);
+
+        vm.prank(taskor);
+        escrow.addTaskValidationRequest(taskId, keccak256("req-1"));
+
+        vm.prank(taskor);
+        vm.expectRevert(TaskEscrowV2.PolicyViolation.selector);
+        escrow.addTaskValidationRequest(taskId, keccak256("req-2"));
+    }
+
+    function test_Lifecycle_WithValidationGating_AndReceiptsLinked() public {
+        bytes32 taskId = _createTask();
+
+        vm.prank(taskor);
+        escrow.acceptTask(taskId);
+
+        vm.prank(taskor);
+        escrow.submitWork(taskId, "ipfs://evidence");
+
+        bytes32 taskReceiptId = keccak256("task-receipt");
+        vm.prank(taskor);
+        escrow.linkReceipt(taskId, taskReceiptId, "ipfs://task-receipt");
+
+        bytes32 tag = bytes32("TAG");
+        vm.prank(community);
+        escrow.setTaskValidationRequirementWithValidators(taskId, tag, 1, 50, 1);
+
+        bytes32 requestHash = keccak256("req-1");
+        vm.prank(community);
+        jury.validationRequest(address(jury), 1, "ipfs://req-1", requestHash);
+
+        bytes32 validationReceiptId = keccak256("validation-receipt");
+        vm.prank(community);
+        jury.linkReceiptToValidation(requestHash, validationReceiptId, "ipfs://validation-receipt");
+
+        vm.prank(community);
+        escrow.addTaskValidationRequest(taskId, requestHash);
+
+        vm.prank(address(0xBEEF));
+        jury.validationResponse(requestHash, 80, "ipfs://resp-1", bytes32(0), tag);
+
+        vm.warp(block.timestamp + 4 days);
+        escrow.finalizeTask(taskId);
+
+        assertTrue(escrow.validationsSatisfied(taskId));
+
+        bytes32[] memory receipts = escrow.getTaskReceipts(taskId);
+        assertEq(receipts.length, 1);
+        assertEq(receipts[0], taskReceiptId);
+
+        bytes32[] memory validationReceipts = jury.getValidationReceipts(requestHash);
+        assertEq(validationReceipts.length, 1);
+        assertEq(validationReceipts[0], validationReceiptId);
     }
 
     // ====================================

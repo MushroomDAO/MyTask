@@ -118,6 +118,7 @@ contract TaskEscrowV2 {
     error InvalidTag();
     error InvalidRequestHash();
     error ValidationsNotSatisfied();
+    error PolicyViolation();
 
     // ====================================
     // State Variables
@@ -149,6 +150,7 @@ contract TaskEscrowV2 {
     struct ValidationRequirement {
         uint64 minCount;
         uint8 minAvgResponse;
+        uint8 minUniqueValidators;
         bool enabled;
     }
 
@@ -156,6 +158,15 @@ contract TaskEscrowV2 {
     mapping(bytes32 => mapping(bytes32 => bool)) private _taskValidationRequestAdded;
     mapping(bytes32 => bytes32[]) private _taskRequiredValidationTags;
     mapping(bytes32 => mapping(bytes32 => ValidationRequirement)) private _taskTagValidationRequirements;
+
+    struct TaskPolicy {
+        uint64 maxReceipts;
+        uint64 maxValidationRequests;
+        bool enabled;
+    }
+
+    mapping(bytes32 => TaskPolicy) private _taskPolicies;
+    mapping(bytes32 => address[]) private _taskAllowedValidators;
 
     // ====================================
     // Events
@@ -528,6 +539,11 @@ contract TaskEscrowV2 {
             revert NotParticipant();
         }
 
+        TaskPolicy memory policy = _taskPolicies[taskId];
+        if (policy.enabled && policy.maxReceipts > 0 && _taskReceipts[taskId].length >= policy.maxReceipts) {
+            revert PolicyViolation();
+        }
+
         if (_taskReceiptAdded[taskId][receiptId]) return;
         _taskReceiptAdded[taskId][receiptId] = true;
         _taskReceipts[taskId].push(receiptId);
@@ -539,6 +555,16 @@ contract TaskEscrowV2 {
         external
         onlyCommunity(taskId)
     {
+        setTaskValidationRequirementWithValidators(taskId, tag, minCount, minAvgResponse, 0);
+    }
+
+    function setTaskValidationRequirementWithValidators(
+        bytes32 taskId,
+        bytes32 tag,
+        uint64 minCount,
+        uint8 minAvgResponse,
+        uint8 minUniqueValidators
+    ) public onlyCommunity(taskId) {
         if (_tasks[taskId].taskId == bytes32(0)) revert InvalidTaskState();
         if (tag == bytes32(0)) revert InvalidTag();
 
@@ -547,6 +573,7 @@ contract TaskEscrowV2 {
 
         existing.minCount = minCount;
         existing.minAvgResponse = minAvgResponse;
+        existing.minUniqueValidators = minUniqueValidators;
         existing.enabled = minCount > 0;
 
         if (!wasEnabled && existing.enabled) {
@@ -564,6 +591,26 @@ contract TaskEscrowV2 {
         delete _taskRequiredValidationTags[taskId];
     }
 
+    function setTaskPolicy(bytes32 taskId, uint64 maxReceipts, uint64 maxValidationRequests)
+        external
+        onlyCommunity(taskId)
+    {
+        if (_tasks[taskId].taskId == bytes32(0)) revert InvalidTaskState();
+        _taskPolicies[taskId] = TaskPolicy({
+            maxReceipts: maxReceipts,
+            maxValidationRequests: maxValidationRequests,
+            enabled: maxReceipts > 0 || maxValidationRequests > 0
+        });
+    }
+
+    function setTaskAllowedValidators(bytes32 taskId, address[] calldata validators) external onlyCommunity(taskId) {
+        if (_tasks[taskId].taskId == bytes32(0)) revert InvalidTaskState();
+        delete _taskAllowedValidators[taskId];
+        for (uint256 i = 0; i < validators.length; i++) {
+            _taskAllowedValidators[taskId].push(validators[i]);
+        }
+    }
+
     function addTaskValidationRequest(bytes32 taskId, bytes32 requestHash) external {
         Task storage task = _tasks[taskId];
         if (task.taskId == bytes32(0)) revert InvalidTaskState();
@@ -571,6 +618,14 @@ contract TaskEscrowV2 {
 
         if (msg.sender != task.community && msg.sender != task.taskor && msg.sender != task.supplier) {
             revert NotParticipant();
+        }
+
+        TaskPolicy memory policy = _taskPolicies[taskId];
+        if (
+            policy.enabled && policy.maxValidationRequests > 0
+                && _taskValidationRequests[taskId].length >= policy.maxValidationRequests
+        ) {
+            revert PolicyViolation();
         }
 
         if (_taskValidationRequestAdded[taskId][requestHash]) return;
@@ -583,6 +638,7 @@ contract TaskEscrowV2 {
         if (requiredTags.length == 0) return true;
 
         bytes32[] storage requests = _taskValidationRequests[taskId];
+        address[] storage allowedValidators = _taskAllowedValidators[taskId];
 
         for (uint256 i = 0; i < requiredTags.length; i++) {
             bytes32 tag = requiredTags[i];
@@ -591,19 +647,35 @@ contract TaskEscrowV2 {
 
             uint256 total = 0;
             uint64 count = 0;
+            address[] memory seen = new address[](requests.length);
+            uint256 uniqueCount = 0;
 
             for (uint256 j = 0; j < requests.length; j++) {
-                ( , , uint8 response, bytes32 responseTag, uint256 lastUpdate) =
+                (address validatorAddress, , uint8 response, bytes32 responseTag, uint256 lastUpdate) =
                     IJuryContract(juryContract).getValidationStatus(requests[j]);
                 if (lastUpdate == 0) continue;
                 if (responseTag != tag) continue;
+                if (!_validatorAllowed(validatorAddress, allowedValidators)) continue;
                 total += response;
                 count++;
+
+                bool alreadySeen = false;
+                for (uint256 k = 0; k < uniqueCount; k++) {
+                    if (seen[k] == validatorAddress) {
+                        alreadySeen = true;
+                        break;
+                    }
+                }
+                if (!alreadySeen) {
+                    seen[uniqueCount] = validatorAddress;
+                    uniqueCount++;
+                }
             }
 
             if (count < req.minCount) return false;
             uint8 avg = uint8(total / count);
             if (avg < req.minAvgResponse) return false;
+            if (req.minUniqueValidators > 0 && uniqueCount < req.minUniqueValidators) return false;
         }
 
         return true;
@@ -655,6 +727,7 @@ contract TaskEscrowV2 {
         if (requiredTags.length == 0) return;
 
         bytes32[] storage requests = _taskValidationRequests[taskId];
+        address[] storage allowedValidators = _taskAllowedValidators[taskId];
 
         for (uint256 i = 0; i < requiredTags.length; i++) {
             bytes32 tag = requiredTags[i];
@@ -663,20 +736,44 @@ contract TaskEscrowV2 {
 
             uint256 total = 0;
             uint64 count = 0;
+            address[] memory seen = new address[](requests.length);
+            uint256 uniqueCount = 0;
 
             for (uint256 j = 0; j < requests.length; j++) {
-                ( , , uint8 response, bytes32 responseTag, uint256 lastUpdate) =
+                (address validatorAddress, , uint8 response, bytes32 responseTag, uint256 lastUpdate) =
                     IJuryContract(juryContract).getValidationStatus(requests[j]);
                 if (lastUpdate == 0) continue;
                 if (responseTag != tag) continue;
+                if (!_validatorAllowed(validatorAddress, allowedValidators)) continue;
                 total += response;
                 count++;
+
+                bool alreadySeen = false;
+                for (uint256 k = 0; k < uniqueCount; k++) {
+                    if (seen[k] == validatorAddress) {
+                        alreadySeen = true;
+                        break;
+                    }
+                }
+                if (!alreadySeen) {
+                    seen[uniqueCount] = validatorAddress;
+                    uniqueCount++;
+                }
             }
 
             if (count < req.minCount) revert ValidationsNotSatisfied();
             uint8 avg = uint8(total / count);
             if (avg < req.minAvgResponse) revert ValidationsNotSatisfied();
+            if (req.minUniqueValidators > 0 && uniqueCount < req.minUniqueValidators) revert ValidationsNotSatisfied();
         }
+    }
+
+    function _validatorAllowed(address validator, address[] storage allowed) internal view returns (bool) {
+        if (allowed.length == 0) return true;
+        for (uint256 i = 0; i < allowed.length; i++) {
+            if (allowed[i] == validator) return true;
+        }
+        return false;
     }
 
     function _refundCommunity(bytes32 taskId) internal {
@@ -709,10 +806,19 @@ contract TaskEscrowV2 {
     function getTaskValidationRequirement(bytes32 taskId, bytes32 tag)
         external
         view
-        returns (uint64 minCount, uint8 minAvgResponse, bool enabled)
+        returns (uint64 minCount, uint8 minAvgResponse, uint8 minUniqueValidators, bool enabled)
     {
         ValidationRequirement memory req = _taskTagValidationRequirements[taskId][tag];
-        return (req.minCount, req.minAvgResponse, req.enabled);
+        return (req.minCount, req.minAvgResponse, req.minUniqueValidators, req.enabled);
+    }
+
+    function getTaskPolicy(bytes32 taskId) external view returns (uint64 maxReceipts, uint64 maxValidationRequests, bool enabled) {
+        TaskPolicy memory p = _taskPolicies[taskId];
+        return (p.maxReceipts, p.maxValidationRequests, p.enabled);
+    }
+
+    function getTaskAllowedValidators(bytes32 taskId) external view returns (address[] memory validators) {
+        return _taskAllowedValidators[taskId];
     }
 
     function getTasksByCommunity(address community) external view returns (bytes32[] memory) {
