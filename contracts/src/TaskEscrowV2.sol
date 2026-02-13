@@ -653,7 +653,7 @@ contract TaskEscrowV2 {
             uint256 uniqueCount = 0;
 
             for (uint256 j = 0; j < requests.length; j++) {
-                (address validatorAddress, , uint8 response, bytes32 responseTag, uint256 lastUpdate) =
+                (address validatorAddress,, uint8 response, bytes32 responseTag, uint256 lastUpdate) =
                     IJuryContract(juryContract).getValidationStatus(requests[j]);
                 if (lastUpdate == 0) continue;
                 if (responseTag != tag) continue;
@@ -742,7 +742,7 @@ contract TaskEscrowV2 {
             uint256 uniqueCount = 0;
 
             for (uint256 j = 0; j < requests.length; j++) {
-                (address validatorAddress, , uint8 response, bytes32 responseTag, uint256 lastUpdate) =
+                (address validatorAddress,, uint8 response, bytes32 responseTag, uint256 lastUpdate) =
                     IJuryContract(juryContract).getValidationStatus(requests[j]);
                 if (lastUpdate == 0) continue;
                 if (responseTag != tag) continue;
@@ -814,7 +814,11 @@ contract TaskEscrowV2 {
         return (req.minCount, req.minAvgResponse, req.minUniqueValidators, req.enabled);
     }
 
-    function getTaskPolicy(bytes32 taskId) external view returns (uint64 maxReceipts, uint64 maxValidationRequests, bool enabled) {
+    function getTaskPolicy(bytes32 taskId)
+        external
+        view
+        returns (uint64 maxReceipts, uint64 maxValidationRequests, bool enabled)
+    {
         TaskPolicy memory p = _taskPolicies[taskId];
         return (p.maxReceipts, p.maxValidationRequests, p.enabled);
     }
