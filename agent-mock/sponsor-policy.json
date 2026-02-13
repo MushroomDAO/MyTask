@@ -1,0 +1,11 @@
+{
+  "policyId": "default",
+  "sponsorAddress": null,
+  "allow": {
+    "hostSuffixes": [],
+    "pathPrefixes": []
+  },
+  "limits": {
+    "maxAmountPerDay": null
+  }
+}

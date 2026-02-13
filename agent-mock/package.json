@@ -3,7 +3,10 @@
   "private": true,
   "version": "0.0.0",
   "scripts": {
-    "linkJuryValidation": "node gasless-link-jury-validation.js"
+    "linkJuryValidation": "node gasless-link-jury-validation.js",
+    "orchestrateTasks": "node gasless-link-jury-validation.js --mode orchestrateTasks",
+    "index": "node indexer.js",
+    "x402:proxy": "node x402-proxy.js"
   },
   "dependencies": {
     "dotenv": "^16.4.5"
@@ -12,4 +15,3 @@
     "viem": "^2.39.3"
   }
 }
-

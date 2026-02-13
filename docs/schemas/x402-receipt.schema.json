@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aastar.io/schemas/x402-receipt.schema.json",
+  "title": "x402 Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "receiptId", "receiptUri", "createdAt", "payer", "payment", "request"],
+  "properties": {
+    "version": { "type": "string", "minLength": 1 },
+    "receiptId": { "type": "string", "pattern": "^0x[0-9a-fA-F]{64}$" },
+    "receiptUri": { "type": "string", "minLength": 1 },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "payer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["address"],
+      "properties": {
+        "address": { "type": "string", "pattern": "^0x[0-9a-fA-F]{40}$" },
+        "agentId": { "type": "string" }
+      }
+    },
+    "sponsor": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "address": { "type": "string", "pattern": "^0x[0-9a-fA-F]{40}$" },
+        "policyId": { "type": "string" }
+      }
+    },
+    "payment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["amount", "currency"],
+      "properties": {
+        "amount": { "type": "string", "minLength": 1 },
+        "currency": { "type": "string", "minLength": 1 },
+        "chainId": { "type": "string" },
+        "txHash": { "type": "string", "pattern": "^0x[0-9a-fA-F]{64}$" }
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "method"],
+      "properties": {
+        "url": { "type": "string", "minLength": 1 },
+        "method": { "type": "string", "minLength": 1 },
+        "headers": { "type": "object" },
+        "bodyHash": { "type": "string", "pattern": "^0x[0-9a-fA-F]{64}$" }
+      }
+    },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": { "type": "integer", "minimum": 100, "maximum": 599 },
+        "headersHash": { "type": "string", "pattern": "^0x[0-9a-fA-F]{64}$" },
+        "bodyHash": { "type": "string", "pattern": "^0x[0-9a-fA-F]{64}$" }
+      }
+    },
+    "metadata": { "type": "object" }
+  }
+}

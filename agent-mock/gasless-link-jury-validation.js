@@ -105,18 +105,83 @@ async function main() {
     const once = parseBool(getArgValue(argv, "--once"), false);
     const autoAccept = parseBool(getArgValue(argv, "--autoAccept"), true);
     const autoSubmit = parseBool(getArgValue(argv, "--autoSubmit"), true);
+    const autoFinalize = parseBool(getArgValue(argv, "--autoFinalize"), true);
+    const autoFastForward = parseBool(getArgValue(argv, "--autoFastForward"), true);
     const evidenceUri =
       getArgValue(argv, "--evidenceUri") ??
       process.env.EVIDENCE_URI ??
       "ipfs://evidence";
-    const receiptUri = getArgValue(argv, "--receiptUri") ?? process.env.RECEIPT_URI;
+    let receiptUri = getArgValue(argv, "--receiptUri") ?? process.env.RECEIPT_URI;
 
     const privateKeyRaw = getArgValue(argv, "--privateKey") ?? requireEnv("PRIVATE_KEY");
     const privateKey = privateKeyRaw.startsWith("0x") ? privateKeyRaw : `0x${privateKeyRaw}`;
     const account = privateKeyToAccount(privateKey);
 
+    const communityPrivateKeyRaw = getArgValue(argv, "--communityPrivateKey") ?? process.env.COMMUNITY_PRIVATE_KEY;
+    const communityAccount = communityPrivateKeyRaw
+      ? privateKeyToAccount(communityPrivateKeyRaw.startsWith("0x") ? communityPrivateKeyRaw : `0x${communityPrivateKeyRaw}`)
+      : account;
+
+    const validatorPrivateKeyRaw = getArgValue(argv, "--validatorPrivateKey") ?? process.env.VALIDATOR_PRIVATE_KEY;
+    const validatorAccount = validatorPrivateKeyRaw
+      ? privateKeyToAccount(validatorPrivateKeyRaw.startsWith("0x") ? validatorPrivateKeyRaw : `0x${validatorPrivateKeyRaw}`)
+      : account;
+
+    const juryContractAddress =
+      getArgValue(argv, "--juryContract") ?? process.env.JURY_CONTRACT_ADDRESS ?? requireEnv("JURY_CONTRACT_ADDRESS");
+    const agentId = BigInt(getArgValue(argv, "--agentId") ?? process.env.AGENT_ID ?? "1");
+
+    const validationTagRaw = getArgValue(argv, "--validationTag") ?? process.env.VALIDATION_TAG;
+    const validationTag = validationTagRaw
+      ? validationTagRaw.startsWith("0x")
+        ? validationTagRaw
+        : toHex(validationTagRaw, { size: 32 })
+      : "0x0000000000000000000000000000000000000000000000000000000000000000";
+    const validationMinCount = BigInt(getArgValue(argv, "--validationMinCount") ?? process.env.VALIDATION_MIN_COUNT ?? "0");
+    const validationMinAvg = Number(getArgValue(argv, "--validationMinAvg") ?? process.env.VALIDATION_MIN_AVG ?? "0");
+    const validationMinUnique = Number(getArgValue(argv, "--validationMinUnique") ?? process.env.VALIDATION_MIN_UNIQUE ?? "0");
+    const validationRequestUri =
+      getArgValue(argv, "--validationRequestUri") ??
+      process.env.VALIDATION_REQUEST_URI ??
+      "ipfs://validation-request";
+    const validationResponseUri =
+      getArgValue(argv, "--validationResponseUri") ??
+      process.env.VALIDATION_RESPONSE_URI ??
+      "ipfs://validation-response";
+    const validationScore = Number(getArgValue(argv, "--validationScore") ?? process.env.VALIDATION_SCORE ?? "80");
+    let validationReceiptUri = getArgValue(argv, "--validationReceiptUri") ?? process.env.VALIDATION_RECEIPT_URI;
+
+    const x402ProxyUrl = getArgValue(argv, "--x402ProxyUrl") ?? process.env.X402_PROXY_URL;
+    const x402Currency = getArgValue(argv, "--x402Currency") ?? process.env.X402_CURRENCY ?? "USD";
+    const x402TaskAmount = getArgValue(argv, "--x402TaskAmount") ?? process.env.X402_TASK_AMOUNT ?? "0";
+    const x402ValidationAmount = getArgValue(argv, "--x402ValidationAmount") ?? process.env.X402_VALIDATION_AMOUNT ?? "0";
+    const x402SponsorAddress = getArgValue(argv, "--x402Sponsor") ?? process.env.X402_SPONSOR_ADDRESS ?? null;
+    const x402PolicyId = getArgValue(argv, "--x402PolicyId") ?? process.env.X402_POLICY_ID ?? "default";
+
     const walletClient = createWalletClient({
       account,
+      chain: {
+        id: chainId,
+        name: "custom",
+        nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },
+        rpcUrls: { default: { http: [rpcUrl] } }
+      },
+      transport: http(rpcUrl)
+    });
+
+    const communityWalletClient = createWalletClient({
+      account: communityAccount,
+      chain: {
+        id: chainId,
+        name: "custom",
+        nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },
+        rpcUrls: { default: { http: [rpcUrl] } }
+      },
+      transport: http(rpcUrl)
+    });
+
+    const validatorWalletClient = createWalletClient({
+      account: validatorAccount,
       chain: {
         id: chainId,
         name: "custom",
@@ -194,17 +259,75 @@ async function main() {
           { name: "receiptUri", type: "string" }
         ],
         outputs: []
+      },
+      {
+        type: "function",
+        name: "setTaskValidationRequirementWithValidators",
+        stateMutability: "nonpayable",
+        inputs: [
+          { name: "taskId", type: "bytes32" },
+          { name: "tag", type: "bytes32" },
+          { name: "minCount", type: "uint64" },
+          { name: "minAvgResponse", type: "uint8" },
+          { name: "minUniqueValidators", type: "uint8" }
+        ],
+        outputs: []
+      },
+      {
+        type: "function",
+        name: "addTaskValidationRequest",
+        stateMutability: "nonpayable",
+        inputs: [
+          { name: "taskId", type: "bytes32" },
+          { name: "requestHash", type: "bytes32" }
+        ],
+        outputs: []
+      },
+      {
+        type: "function",
+        name: "finalizeTask",
+        stateMutability: "nonpayable",
+        inputs: [{ name: "taskId", type: "bytes32" }],
+        outputs: []
       }
     ];
 
-    const sendTx = async ({ to, data }) => {
+    const sendTx = async ({ to, data, wallet }) => {
+      const from = wallet.account.address;
       if (dryRun) {
-        process.stdout.write(JSON.stringify({ to, data, from: account.address, dryRun: true }) + "\n");
+        process.stdout.write(JSON.stringify({ to, data, from, dryRun: true }) + "\n");
         return null;
       }
-      const hash = await walletClient.sendTransaction({ to, data, value: 0n });
+      const hash = await wallet.sendTransaction({ to, data, value: 0n });
       await publicClient.waitForTransactionReceipt({ hash });
       return hash;
+    };
+
+    const rpcRequest = async (method, params) => {
+      return await publicClient.request({ method, params });
+    };
+
+    const x402Pay = async ({ url, method, amount, payerAddress }) => {
+      if (!x402ProxyUrl) return null;
+      const res = await fetch(`${x402ProxyUrl.replace(/\/$/, "")}/pay`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          url,
+          method,
+          amount,
+          currency: x402Currency,
+          payerAddress,
+          agentId: agentId.toString(),
+          chainId: String(chainId),
+          sponsorAddress: x402SponsorAddress,
+          policyId: x402PolicyId,
+          metadata: { mode: "orchestrateTasks" }
+        })
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(`x402 /pay ${res.status}: ${JSON.stringify(json)}`);
+      return json.receiptUri;
     };
 
     let unwatch = () => {};
@@ -238,7 +361,7 @@ async function main() {
               functionName: "acceptTask",
               args: [taskId]
             });
-            const txHash = await sendTx({ to: taskEscrow, data });
+            const txHash = await sendTx({ to: taskEscrow, data, wallet: walletClient });
             process.stdout.write(JSON.stringify({ mode, action: "acceptTask", taskId, txHash }) + "\n");
           }
 
@@ -248,10 +371,24 @@ async function main() {
               functionName: "submitWork",
               args: [taskId, evidenceUri]
             });
-            const txHash = await sendTx({ to: taskEscrow, data });
+            const txHash = await sendTx({ to: taskEscrow, data, wallet: walletClient });
             process.stdout.write(
               JSON.stringify({ mode, action: "submitWork", taskId, evidenceUri, txHash }) + "\n"
             );
+
+            if (!receiptUri && x402ProxyUrl && BigInt(x402TaskAmount) > 0n) {
+              try {
+                receiptUri = await x402Pay({
+                  url: evidenceUri,
+                  method: "EVIDENCE",
+                  amount: x402TaskAmount,
+                  payerAddress: account.address
+                });
+                process.stdout.write(JSON.stringify({ mode, action: "x402Pay", kind: "task", receiptUri }) + "\n");
+              } catch (e) {
+                process.stdout.write(JSON.stringify({ mode, action: "x402PayFailed", kind: "task", error: String(e) }) + "\n");
+              }
+            }
 
             if (receiptUri) {
               const receiptId = keccak256(toHex(receiptUri));
@@ -260,10 +397,190 @@ async function main() {
                 functionName: "linkReceipt",
                 args: [taskId, receiptId, receiptUri]
               });
-              const linkReceiptTxHash = await sendTx({ to: taskEscrow, data: linkReceiptData });
+              const linkReceiptTxHash = await sendTx({ to: taskEscrow, data: linkReceiptData, wallet: walletClient });
               process.stdout.write(
                 JSON.stringify({ mode, action: "linkReceipt", taskId, receiptId, receiptUri, txHash: linkReceiptTxHash }) + "\n"
               );
+            }
+
+            if (validationMinCount > 0n && String(task.community).toLowerCase() === communityAccount.address.toLowerCase()) {
+              const setReqData = encodeFunctionData({
+                abi: taskEscrowAbi,
+                functionName: "setTaskValidationRequirementWithValidators",
+                args: [taskId, validationTag, validationMinCount, validationMinAvg, validationMinUnique]
+              });
+              const setReqTxHash = await sendTx({ to: taskEscrow, data: setReqData, wallet: communityWalletClient });
+              process.stdout.write(
+                JSON.stringify({
+                  mode,
+                  action: "setTaskValidationRequirementWithValidators",
+                  taskId,
+                  tag: validationTag,
+                  minCount: validationMinCount.toString(),
+                  minAvg: validationMinAvg,
+                  minUnique: validationMinUnique,
+                  txHash: setReqTxHash
+                }) + "\n"
+              );
+            }
+
+            const juryAbi = [
+              {
+                type: "function",
+                name: "validationRequest",
+                stateMutability: "nonpayable",
+                inputs: [
+                  { name: "validatorAddress", type: "address" },
+                  { name: "agentId", type: "uint256" },
+                  { name: "requestUri", type: "string" },
+                  { name: "requestHash", type: "bytes32" }
+                ],
+                outputs: []
+              },
+              {
+                type: "function",
+                name: "validationResponse",
+                stateMutability: "nonpayable",
+                inputs: [
+                  { name: "requestHash", type: "bytes32" },
+                  { name: "response", type: "uint8" },
+                  { name: "responseUri", type: "string" },
+                  { name: "responseHash", type: "bytes32" },
+                  { name: "tag", type: "bytes32" }
+                ],
+                outputs: []
+              },
+              {
+                type: "function",
+                name: "linkReceiptToValidation",
+                stateMutability: "nonpayable",
+                inputs: [
+                  { name: "requestHash", type: "bytes32" },
+                  { name: "receiptId", type: "bytes32" },
+                  { name: "receiptUri", type: "string" }
+                ],
+                outputs: []
+              }
+            ];
+
+            const requestHash =
+              getArgValue(argv, "--requestHash") ??
+              process.env.VALIDATION_REQUEST_HASH ??
+              keccak256(toHex(`${taskId}:${validationTag}:${validationRequestUri}`));
+
+            if (validationMinCount > 0n) {
+              const reqData = encodeFunctionData({
+                abi: juryAbi,
+                functionName: "validationRequest",
+                args: [juryContractAddress, agentId, validationRequestUri, requestHash]
+              });
+              const reqTxHash = await sendTx({ to: juryContractAddress, data: reqData, wallet: communityWalletClient });
+              process.stdout.write(
+                JSON.stringify({ mode, action: "validationRequest", requestHash, requestUri: validationRequestUri, txHash: reqTxHash }) + "\n"
+              );
+
+              const addReqData = encodeFunctionData({
+                abi: taskEscrowAbi,
+                functionName: "addTaskValidationRequest",
+                args: [taskId, requestHash]
+              });
+              const addReqTxHash = await sendTx({ to: taskEscrow, data: addReqData, wallet: walletClient });
+              process.stdout.write(
+                JSON.stringify({ mode, action: "addTaskValidationRequest", taskId, requestHash, txHash: addReqTxHash }) + "\n"
+              );
+
+              if (!validationReceiptUri && x402ProxyUrl && BigInt(x402ValidationAmount) > 0n) {
+                try {
+                  validationReceiptUri = await x402Pay({
+                    url: validationRequestUri,
+                    method: "VALIDATION",
+                    amount: x402ValidationAmount,
+                    payerAddress: communityAccount.address
+                  });
+                  process.stdout.write(JSON.stringify({ mode, action: "x402Pay", kind: "validation", receiptUri: validationReceiptUri }) + "\n");
+                } catch (e) {
+                  process.stdout.write(JSON.stringify({ mode, action: "x402PayFailed", kind: "validation", error: String(e) }) + "\n");
+                }
+              }
+
+              if (validationReceiptUri) {
+                const validationReceiptId = keccak256(toHex(validationReceiptUri));
+                const linkValidationReceiptData = encodeFunctionData({
+                  abi: juryAbi,
+                  functionName: "linkReceiptToValidation",
+                  args: [requestHash, validationReceiptId, validationReceiptUri]
+                });
+                const linkValidationReceiptTxHash = await sendTx({
+                  to: juryContractAddress,
+                  data: linkValidationReceiptData,
+                  wallet: communityWalletClient
+                });
+                process.stdout.write(
+                  JSON.stringify({
+                    mode,
+                    action: "linkReceiptToValidation",
+                    requestHash,
+                    receiptId: validationReceiptId,
+                    receiptUri: validationReceiptUri,
+                    txHash: linkValidationReceiptTxHash
+                  }) + "\n"
+                );
+              }
+
+              const respData = encodeFunctionData({
+                abi: juryAbi,
+                functionName: "validationResponse",
+                args: [requestHash, validationScore, validationResponseUri, "0x0000000000000000000000000000000000000000000000000000000000000000", validationTag]
+              });
+              const respTxHash = await sendTx({ to: juryContractAddress, data: respData, wallet: validatorWalletClient });
+              process.stdout.write(
+                JSON.stringify({
+                  mode,
+                  action: "validationResponse",
+                  requestHash,
+                  score: validationScore,
+                  responseUri: validationResponseUri,
+                  tag: validationTag,
+                  txHash: respTxHash
+                }) + "\n"
+              );
+            }
+
+            if (autoFinalize) {
+              const refreshed = await publicClient.readContract({
+                address: taskEscrow,
+                abi: taskEscrowAbi,
+                functionName: "getTask",
+                args: [taskId]
+              });
+
+              const challengeDeadline = BigInt(refreshed.challengeDeadline);
+              const latestBlock = await publicClient.getBlock();
+              const now = BigInt(latestBlock.timestamp);
+
+              if (autoFastForward && challengeDeadline > 0n && challengeDeadline > now) {
+                const delta = challengeDeadline - now + 2n;
+                try {
+                  await rpcRequest("evm_increaseTime", [Number(delta)]);
+                  await rpcRequest("evm_mine", []);
+                  process.stdout.write(JSON.stringify({ mode, action: "fastForward", seconds: Number(delta) }) + "\n");
+                } catch (e) {
+                  process.stdout.write(JSON.stringify({ mode, action: "fastForwardFailed", error: String(e) }) + "\n");
+                }
+              }
+
+              const finalizeData = encodeFunctionData({
+                abi: taskEscrowAbi,
+                functionName: "finalizeTask",
+                args: [taskId]
+              });
+
+              try {
+                const finalizeTxHash = await sendTx({ to: taskEscrow, data: finalizeData, wallet: walletClient });
+                process.stdout.write(JSON.stringify({ mode, action: "finalizeTask", taskId, txHash: finalizeTxHash }) + "\n");
+              } catch (e) {
+                process.stdout.write(JSON.stringify({ mode, action: "finalizeFailed", taskId, error: String(e) }) + "\n");
+              }
             }
           }
 
@@ -278,7 +595,12 @@ async function main() {
     return;
   }
 
-  if (mode !== "linkJuryValidation" && mode !== "linkReceipt" && mode !== "linkValidationReceipt") {
+  if (
+    mode !== "linkJuryValidation" &&
+    mode !== "linkReceipt" &&
+    mode !== "linkValidationReceipt" &&
+    mode !== "linkReceiptToValidation"
+  ) {
     throw new Error(`Unsupported mode: ${mode}`);
   }
 
@@ -293,23 +615,23 @@ async function main() {
   const juryTaskHash =
     mode === "linkJuryValidation" ? getArgValue(argv, "--juryTaskHash") ?? requireEnv("JURY_TASK_HASH") : undefined;
   const requestHash =
-    mode === "linkValidationReceipt"
+    mode === "linkValidationReceipt" || mode === "linkReceiptToValidation"
       ? getArgValue(argv, "--requestHash") ?? requireEnv("VALIDATION_REQUEST_HASH")
       : undefined;
   const juryContractAddress =
-    mode === "linkValidationReceipt"
+    mode === "linkValidationReceipt" || mode === "linkReceiptToValidation"
       ? getArgValue(argv, "--juryContract") ?? requireEnv("JURY_CONTRACT_ADDRESS")
       : undefined;
   const receiptUri =
-    mode === "linkReceipt" || mode === "linkValidationReceipt"
+    mode === "linkReceipt" || mode === "linkValidationReceipt" || mode === "linkReceiptToValidation"
       ? getArgValue(argv, "--receiptUri") ?? requireEnv("RECEIPT_URI")
       : undefined;
   const receiptIdRaw =
-    mode === "linkReceipt" || mode === "linkValidationReceipt"
+    mode === "linkReceipt" || mode === "linkValidationReceipt" || mode === "linkReceiptToValidation"
       ? getArgValue(argv, "--receiptId") ?? process.env.RECEIPT_ID
       : undefined;
   const receiptId =
-    mode === "linkReceipt" || mode === "linkValidationReceipt"
+    mode === "linkReceipt" || mode === "linkValidationReceipt" || mode === "linkReceiptToValidation"
       ? receiptIdRaw
         ? receiptIdRaw.startsWith("0x")
           ? receiptIdRaw
@@ -400,7 +722,7 @@ async function main() {
             args: [requestHash, receiptId, receiptUri]
           });
 
-  const target = mode === "linkValidationReceipt" ? juryContractAddress : taskEscrow;
+  const target = mode === "linkValidationReceipt" || mode === "linkReceiptToValidation" ? juryContractAddress : taskEscrow;
   const callData = encodeFunctionData({
     abi: aaAbi,
     functionName: "execute",
