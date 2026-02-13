@@ -298,7 +298,7 @@ Missing for a complete “agent economy” product:
 
 # MyTask 产品路线图 + PRD + 技术设计（链上任务 + Agent 经济系统）
 
-最后更新：2026-02-12
+最后更新：2026-02-13
 
 ## 0）我在 `docs/` 里审阅了什么（本文输入）
 
@@ -343,7 +343,7 @@ Missing for a complete “agent economy” product:
 - **Agent Operator**：运营自动化 agent，完成任务、用 x402 购买工具、积累声誉。
 - **Facilitator / Paymaster Operator**：提供 gasless 体验与/或 x402 赞助清算，追求可持续收入覆盖成本。
 
-### 3.1 Validator 与 Jury（陪审）有什么区别？是否重复？
+### 3.1（中文版）Validator 与 Jury（陪审）有什么区别？是否重复？
 
 - **Validator（验证者）** 是“输出验证结论”的抽象角色：任何能对某个验证请求给出可被复核/追责的验证结果的主体都算验证者（人类专家、预言机、ZK/TEE 验证器、DAO 委员会、自动化 judge 等）。其输出形态是可被链上记录与聚合的结果（ERC-8004 语义：request → response + tag + score），用于声誉沉淀与任务结算门槛。
 - **Jury（陪审团）** 是“处理争议/主观判断”的验证者实现：由一组 juror（质押 + 投票 + 共识阈值）产出一个最终结论，通常更慢、更贵，但适合主观性强、欺诈空间大、或对赔付/罚没有强约束的任务。
@@ -356,7 +356,7 @@ Missing for a complete “agent economy” product:
   - 更客观、可自动化、可生成 proof：优先 Validator（自动/ZK/TEE/webproof）。
   - 更主观、易争议、需要最终裁决与 slashing：优先 Jury。
 
-### 3.2 Taskor 是否可以同时也是 Agent？Agent 究竟是什么？
+### 3.2（中文版）Taskor 是否可以同时也是 Agent？Agent 究竟是什么？
 
 - **Taskor** 是任务托管里的“执行者角色”，在链上表现为一个接单并收款的账户地址。
 - **Agent** 是引入“agent 经济系统”后的一类经济主体：除了执行任务，还会通过 x402 购买工具/数据并累积声誉。落地上，Agent 通常是“由人/组织运营的一套 AI/自动化系统”，其链上身份是一个 **钱包账户（EOA 或 AA 智能账户）**。
@@ -367,7 +367,7 @@ Missing for a complete “agent economy” product:
 
 ## 4）PRD（产品需求）
 
-### 4.1 核心任务（JTBD）
+### 4.1（中文版）核心任务（JTBD）
 
 - 创建任务：托管奖励资金，并明确验收标准。
 - 支持接单、提交交付物/证据与证据链接。
@@ -376,7 +376,7 @@ Missing for a complete “agent economy” product:
 - Agent 可通过 x402 支付外部资源（API/数据/工具），并支持赞助与预算。
 - 为 agent 与验证者沉淀可持续的声誉/验证历史。
 
-### 4.2 MVP 功能需求
+### 4.2（中文版）MVP 功能需求
 
 **链上任务系统（已存在，必须保持稳定）**
 
@@ -409,14 +409,14 @@ Missing for a complete “agent economy” product:
   - ERC-2612 Permit 和/或 EIP-3009 transfer authorization（取决于 token），
   - 能用则走 AA gasless 提交（Paymaster/Bundler 集成）。
 
-### 4.3 非功能需求
+### 4.3（中文版）非功能需求
 
 - **可审计**：每次验证与每次付费资源访问都能归因到 agentId 与 taskId（直接或经由回执）。
 - **安全**：预算限制、重放保护、签名时间窗。
 - **隐私控制**：链上仅存 hash；完整证据与回执存链下（IPFS/HTTP）。
 - **可扩展**：尽量无需升级合约即可接入新的资源类型与验证者。
 
-### 4.4 MVP 成功指标
+### 4.4（中文版）MVP 成功指标
 
 - 任务完成率与从提交到 validated 的中位耗时。
 - 成本可预测性：每任务 x402 花费的预估 vs 实际偏差。
@@ -425,7 +425,7 @@ Missing for a complete “agent economy” product:
 
 ## 5）技术设计（系统架构）
 
-### 5.1 高层组件
+### 5.1（中文版）高层组件
 
 **链上**
 
@@ -444,7 +444,7 @@ Missing for a complete “agent economy” product:
   - 最小索引器（events → DB），
   - IPFS（证据、验证报告、回执）或对象存储。
 
-### 5.2 关键流程
+### 5.2（中文版）关键流程
 
 #### 流程 A：任务生命周期 + 陪审验证（现有）
 
@@ -472,14 +472,14 @@ Missing for a complete “agent economy” product:
 3）按 agentId 聚合声誉查询（次数、均分、按 tag 维度）。  
 4）MyTask 的结算策略可按任务类型引入 “最小验证达成” 门槛。  
 
-### 5.3 数据模型（规范化标识）
+### 5.3（中文版）数据模型（规范化标识）
 
 - `taskId`（bytes32）：MyTask 的主任务标识。
 - `agentId`（uint256）：验证与经济系统的主 Agent 标识。
 - `requestHash`（bytes32）：验证请求标识（尽量可确定性生成）。
 - `x402ReceiptId`（bytes32）：规范化支付回执负载的 hash。
 
-### 5.4 经济模型（默认值，可配置）
+### 5.4（中文版）经济模型（默认值，可配置）
 
 **分账（Payouts）**
 
