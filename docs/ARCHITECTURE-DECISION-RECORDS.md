@@ -514,6 +514,7 @@ MyTask 的链上流程涉及多角色、多合约、多脚本联动。为了让�
 3. **Orchestrator 结构化日志**（`agent-mock/gasless-link-jury-validation.js`）
    - 输出统一包含 `ts` 与 `event` 字段，便于后续接入聚合与告警
    - Trace：任务内链路使用 `taskId` 作为 traceId，并透传到 x402 的 `x-trace-id` 请求头
+   - Debug API：可选 `--serve true --port 8791` 提供 `/health`、`/metrics`、`/state`
    - 持久化：支持 `--logFile`/`--logMaxBytes`（或 `ORCHESTRATOR_LOG_FILE`/`ORCHESTRATOR_LOG_MAX_BYTES`）写入与滚动
    - Reward 绑定：默认将 reward 的 `extraData` 编码为 `abi.encode(bytes32 taskId, bytes32 juryTaskHash)`，便于链上可追溯
 

@@ -12,6 +12,7 @@ const {
   toHex
 } = require("viem");
 const { privateKeyToAccount } = require("viem/accounts");
+const nodeHttp = require("http");
 const fs = require("fs");
 const path = require("path");
 require("dotenv").config({ path: path.join(process.cwd(), ".env") });
@@ -212,6 +213,60 @@ async function main() {
     ensureDir(path.dirname(stateFile));
     const state = readJsonRecovering(stateFile, { version: 1, tasks: {}, lastScanToBlock: "0" });
     if (!state.tasks || typeof state.tasks !== "object") state.tasks = {};
+
+    const serveApi = parseBool(getArgValue(argv, "--serve") ?? process.env.ORCH_SERVE, false);
+    const apiPort = Number(getArgValue(argv, "--port") ?? process.env.ORCH_PORT ?? "8791");
+    const startedAtMs = Date.now();
+    const counters = {
+      tasksProcessed: 0,
+      tasksFailed: 0,
+      rewardsTriggered: 0,
+      rewardsFailed: 0,
+      x402PayOk: 0,
+      x402PayFail: 0
+    };
+
+    const sendJson = (res, code, obj) => {
+      const body = JSON.stringify(obj);
+      res.writeHead(code, { "content-type": "application/json", "content-length": Buffer.byteLength(body) });
+      res.end(body);
+    };
+
+    if (serveApi) {
+      const server = nodeHttp.createServer((req, res) => {
+        const traceId = req.headers["x-trace-id"] ? String(req.headers["x-trace-id"]) : randomId();
+        const u = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+        const p = u.pathname;
+        if (req.method === "GET" && p === "/health") {
+          logEvent({ event: "orchestrator.http", ok: true, traceId, method: req.method, path: p, code: 200 });
+          return sendJson(res, 200, { ok: true, mode, runId });
+        }
+        if (req.method === "GET" && p === "/metrics") {
+          const summary = {
+            ok: true,
+            mode,
+            runId,
+            uptimeMs: Date.now() - startedAtMs,
+            counters,
+            state: {
+              stateFile,
+              tasksTotal: Object.keys(state.tasks).length,
+              tasksDone: Object.values(state.tasks).filter((t) => t?.done === true).length,
+              lastScanToBlock: state.lastScanToBlock ?? "0"
+            }
+          };
+          logEvent({ event: "orchestrator.http", ok: true, traceId, method: req.method, path: p, code: 200 });
+          return sendJson(res, 200, summary);
+        }
+        if (req.method === "GET" && p === "/state") {
+          logEvent({ event: "orchestrator.http", ok: true, traceId, method: req.method, path: p, code: 200 });
+          return sendJson(res, 200, { ok: true, state });
+        }
+        logEvent({ event: "orchestrator.http", ok: false, traceId, method: req.method, path: p, code: 404 });
+        return sendJson(res, 404, { error: "not-found" });
+      });
+      server.listen(apiPort, () => logEvent({ event: "orchestrator.serve", ok: true, port: apiPort }));
+    }
     const evidenceUri =
       getArgValue(argv, "--evidenceUri") ??
       process.env.EVIDENCE_URI ??
@@ -450,30 +505,37 @@ async function main() {
 
     const x402Pay = async ({ url, method, amount, payerAddress, traceId }) => {
       if (!x402ProxyUrl) return null;
-      return await withRetries(
-        async () => {
-          const res = await fetch(`${x402ProxyUrl.replace(/\/$/, "")}/pay`, {
-            method: "POST",
-            headers: { "content-type": "application/json", "x-trace-id": traceId ?? "" },
-            body: JSON.stringify({
-              url,
-              method,
-              amount,
-              currency: x402Currency,
-              payerAddress,
-              agentId: agentId.toString(),
-              chainId: String(chainId),
-              sponsorAddress: x402SponsorAddress,
-              policyId: x402PolicyId,
-              metadata: { mode: "orchestrateTasks" }
-            })
-          });
-          const json = await res.json().catch(() => ({}));
-          if (!res.ok) throw new Error(`x402 /pay ${res.status}: ${JSON.stringify(json)}`);
-          return json.receiptUri;
-        },
-        { retries: 2, baseDelayMs: 400, label: "x402Pay" }
-      );
+      try {
+        const receiptUriOut = await withRetries(
+          async () => {
+            const res = await fetch(`${x402ProxyUrl.replace(/\/$/, "")}/pay`, {
+              method: "POST",
+              headers: { "content-type": "application/json", "x-trace-id": traceId ?? "" },
+              body: JSON.stringify({
+                url,
+                method,
+                amount,
+                currency: x402Currency,
+                payerAddress,
+                agentId: agentId.toString(),
+                chainId: String(chainId),
+                sponsorAddress: x402SponsorAddress,
+                policyId: x402PolicyId,
+                metadata: { mode: "orchestrateTasks" }
+              })
+            });
+            const json = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(`x402 /pay ${res.status}: ${JSON.stringify(json)}`);
+            return json.receiptUri;
+          },
+          { retries: 2, baseDelayMs: 400, label: "x402Pay" }
+        );
+        counters.x402PayOk += 1;
+        return receiptUriOut;
+      } catch (e) {
+        counters.x402PayFail += 1;
+        throw e;
+      }
     };
 
     const saveState = () => {
@@ -506,6 +568,7 @@ async function main() {
       const entry = state.tasks[taskIdKey];
       if (entry.done) return;
 
+      counters.tasksProcessed += 1;
       entry.attempts = Number(entry.attempts ?? 0) + 1;
       entry.lastAttemptAt = new Date().toISOString();
       entry.lastSource = source;
@@ -830,11 +893,13 @@ async function main() {
               value: rewardValue.toString(),
               txHash: rewardTxHash
             });
+            counters.rewardsTriggered += 1;
           } catch (e) {
             entry.rewardTriggered = false;
             entry.rewardError = String(e);
             saveState();
             logTaskEvent({ event: "orchestrator.rewardFailed", ok: false, mode, error: String(e) });
+            counters.rewardsFailed += 1;
           }
         }
 
@@ -848,6 +913,7 @@ async function main() {
         entry.lastError = String(e);
         saveState();
         logTaskEvent({ event: "orchestrator.taskFailed", ok: false, mode, source, error: String(e) });
+        counters.tasksFailed += 1;
       }
     };
 
