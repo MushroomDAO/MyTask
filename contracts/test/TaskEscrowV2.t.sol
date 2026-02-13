@@ -271,6 +271,40 @@ contract TaskEscrowV2Test is Test {
         escrow.finalizeTask(taskId);
     }
 
+    function test_FinalizeTask_RevertWhenValidationsNotSatisfied() public {
+        bytes32 taskId = _createTask();
+
+        vm.prank(taskor);
+        escrow.acceptTask(taskId);
+
+        vm.prank(taskor);
+        escrow.submitWork(taskId, "ipfs://evidence");
+
+        bytes32 tag = bytes32("TAG");
+        vm.prank(community);
+        escrow.setTaskValidationRequirement(taskId, tag, 1, 50);
+
+        bytes32 requestHash = keccak256("req-1");
+        vm.prank(community);
+        jury.validationRequest(address(jury), 1, "ipfs://req-1", requestHash);
+
+        vm.prank(community);
+        escrow.addTaskValidationRequest(taskId, requestHash);
+
+        vm.warp(block.timestamp + 4 days);
+
+        vm.expectRevert(TaskEscrowV2.ValidationsNotSatisfied.selector);
+        escrow.finalizeTask(taskId);
+
+        vm.prank(address(0xBEEF));
+        jury.validationResponse(requestHash, 80, "ipfs://resp-1", bytes32(0), tag);
+
+        escrow.finalizeTask(taskId);
+
+        TaskEscrowV2.Task memory task = escrow.getTask(taskId);
+        assertEq(uint256(task.status), uint256(TaskEscrowV2.TaskStatus.Finalized));
+    }
+
     // ====================================
     // Early Approval Tests
     // ====================================

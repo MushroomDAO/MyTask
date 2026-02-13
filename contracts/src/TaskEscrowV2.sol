@@ -115,6 +115,9 @@ contract TaskEscrowV2 {
     error ZeroAmount();
     error InvalidDeadline();
     error InvalidReceipt();
+    error InvalidTag();
+    error InvalidRequestHash();
+    error ValidationsNotSatisfied();
 
     // ====================================
     // State Variables
@@ -142,6 +145,17 @@ contract TaskEscrowV2 {
 
     mapping(bytes32 => bytes32[]) private _taskReceipts;
     mapping(bytes32 => mapping(bytes32 => bool)) private _taskReceiptAdded;
+
+    struct ValidationRequirement {
+        uint64 minCount;
+        uint8 minAvgResponse;
+        bool enabled;
+    }
+
+    mapping(bytes32 => bytes32[]) private _taskValidationRequests;
+    mapping(bytes32 => mapping(bytes32 => bool)) private _taskValidationRequestAdded;
+    mapping(bytes32 => bytes32[]) private _taskRequiredValidationTags;
+    mapping(bytes32 => mapping(bytes32 => ValidationRequirement)) private _taskTagValidationRequirements;
 
     // ====================================
     // Events
@@ -521,11 +535,56 @@ contract TaskEscrowV2 {
         emit ReceiptLinked(taskId, receiptId, receiptUri, msg.sender);
     }
 
+    function setTaskValidationRequirement(bytes32 taskId, bytes32 tag, uint64 minCount, uint8 minAvgResponse)
+        external
+        onlyCommunity(taskId)
+    {
+        if (_tasks[taskId].taskId == bytes32(0)) revert InvalidTaskState();
+        if (tag == bytes32(0)) revert InvalidTag();
+
+        ValidationRequirement storage existing = _taskTagValidationRequirements[taskId][tag];
+        bool wasEnabled = existing.enabled;
+
+        existing.minCount = minCount;
+        existing.minAvgResponse = minAvgResponse;
+        existing.enabled = minCount > 0;
+
+        if (!wasEnabled && existing.enabled) {
+            _taskRequiredValidationTags[taskId].push(tag);
+        }
+    }
+
+    function clearTaskValidationRequirements(bytes32 taskId) external onlyCommunity(taskId) {
+        if (_tasks[taskId].taskId == bytes32(0)) revert InvalidTaskState();
+
+        bytes32[] storage tags = _taskRequiredValidationTags[taskId];
+        for (uint256 i = 0; i < tags.length; i++) {
+            delete _taskTagValidationRequirements[taskId][tags[i]];
+        }
+        delete _taskRequiredValidationTags[taskId];
+    }
+
+    function addTaskValidationRequest(bytes32 taskId, bytes32 requestHash) external {
+        Task storage task = _tasks[taskId];
+        if (task.taskId == bytes32(0)) revert InvalidTaskState();
+        if (requestHash == bytes32(0)) revert InvalidRequestHash();
+
+        if (msg.sender != task.community && msg.sender != task.taskor && msg.sender != task.supplier) {
+            revert NotParticipant();
+        }
+
+        if (_taskValidationRequestAdded[taskId][requestHash]) return;
+        _taskValidationRequestAdded[taskId][requestHash] = true;
+        _taskValidationRequests[taskId].push(requestHash);
+    }
+
     // ====================================
     // Internal Functions
     // ====================================
 
     function _distributePayments(bytes32 taskId) internal {
+        _requireValidationsSatisfied(taskId);
+
         Task storage task = _tasks[taskId];
         uint256 reward = task.reward;
 
@@ -560,6 +619,35 @@ contract TaskEscrowV2 {
         emit TaskFinalized(taskId, taskorPayout, supplierPayout, juryPayout);
     }
 
+    function _requireValidationsSatisfied(bytes32 taskId) internal view {
+        bytes32[] storage requiredTags = _taskRequiredValidationTags[taskId];
+        if (requiredTags.length == 0) return;
+
+        bytes32[] storage requests = _taskValidationRequests[taskId];
+
+        for (uint256 i = 0; i < requiredTags.length; i++) {
+            bytes32 tag = requiredTags[i];
+            ValidationRequirement storage req = _taskTagValidationRequirements[taskId][tag];
+            if (!req.enabled) continue;
+
+            uint256 total = 0;
+            uint64 count = 0;
+
+            for (uint256 j = 0; j < requests.length; j++) {
+                ( , , uint8 response, bytes32 responseTag, uint256 lastUpdate) =
+                    IJuryContract(juryContract).getValidationStatus(requests[j]);
+                if (lastUpdate == 0) continue;
+                if (responseTag != tag) continue;
+                total += response;
+                count++;
+            }
+
+            if (count < req.minCount) revert ValidationsNotSatisfied();
+            uint8 avg = uint8(total / count);
+            if (avg < req.minAvgResponse) revert ValidationsNotSatisfied();
+        }
+    }
+
     function _refundCommunity(bytes32 taskId) internal {
         Task storage task = _tasks[taskId];
         if (!IERC20(task.token).transfer(task.community, task.reward)) {
@@ -577,6 +665,23 @@ contract TaskEscrowV2 {
 
     function getTaskReceipts(bytes32 taskId) external view returns (bytes32[] memory receiptIds) {
         return _taskReceipts[taskId];
+    }
+
+    function getTaskValidationRequests(bytes32 taskId) external view returns (bytes32[] memory requestHashes) {
+        return _taskValidationRequests[taskId];
+    }
+
+    function getTaskRequiredValidationTags(bytes32 taskId) external view returns (bytes32[] memory tags) {
+        return _taskRequiredValidationTags[taskId];
+    }
+
+    function getTaskValidationRequirement(bytes32 taskId, bytes32 tag)
+        external
+        view
+        returns (uint64 minCount, uint8 minAvgResponse, bool enabled)
+    {
+        ValidationRequirement memory req = _taskTagValidationRequirements[taskId][tag];
+        return (req.minCount, req.minAvgResponse, req.enabled);
     }
 
     function getTasksByCommunity(address community) external view returns (bytes32[] memory) {

@@ -109,6 +109,7 @@ async function main() {
       getArgValue(argv, "--evidenceUri") ??
       process.env.EVIDENCE_URI ??
       "ipfs://evidence";
+    const receiptUri = getArgValue(argv, "--receiptUri") ?? process.env.RECEIPT_URI;
 
     const privateKeyRaw = getArgValue(argv, "--privateKey") ?? requireEnv("PRIVATE_KEY");
     const privateKey = privateKeyRaw.startsWith("0x") ? privateKeyRaw : `0x${privateKeyRaw}`;
@@ -182,6 +183,17 @@ async function main() {
           { name: "evidenceUri", type: "string" }
         ],
         outputs: []
+      },
+      {
+        type: "function",
+        name: "linkReceipt",
+        stateMutability: "nonpayable",
+        inputs: [
+          { name: "taskId", type: "bytes32" },
+          { name: "receiptId", type: "bytes32" },
+          { name: "receiptUri", type: "string" }
+        ],
+        outputs: []
       }
     ];
 
@@ -240,6 +252,19 @@ async function main() {
             process.stdout.write(
               JSON.stringify({ mode, action: "submitWork", taskId, evidenceUri, txHash }) + "\n"
             );
+
+            if (receiptUri) {
+              const receiptId = keccak256(toHex(`${receiptUri}:${taskId}`));
+              const linkReceiptData = encodeFunctionData({
+                abi: taskEscrowAbi,
+                functionName: "linkReceipt",
+                args: [taskId, receiptId, receiptUri]
+              });
+              const linkReceiptTxHash = await sendTx({ to: taskEscrow, data: linkReceiptData });
+              process.stdout.write(
+                JSON.stringify({ mode, action: "linkReceipt", taskId, receiptId, receiptUri, txHash: linkReceiptTxHash }) + "\n"
+              );
+            }
           }
 
           if (once) {
