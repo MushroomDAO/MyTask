@@ -472,6 +472,8 @@ contract JuryContract is IJuryContract {
         bytes32, /* responseHash */
         bytes32 tag
     ) external {
+        require(_jurorActive[msg.sender], "Not an active juror");
+        require(response <= 100, "Invalid response score");
         Task storage task = _tasks[requestHash];
         require(task.taskHash != bytes32(0), "Task not found");
         require(_taskCreators[requestHash] != msg.sender, "Conflict of interest");

@@ -296,7 +296,14 @@ contract TaskEscrowV2Test is Test {
         vm.expectRevert(TaskEscrowV2.ValidationsNotSatisfied.selector);
         escrow.finalizeTask(taskId);
 
-        vm.prank(address(0xBEEF));
+        address validator = address(0xBEEF);
+        stakingToken.mint(validator, 1000 ether);
+        vm.prank(validator);
+        stakingToken.approve(address(jury), type(uint256).max);
+        vm.prank(validator);
+        jury.registerJuror(MIN_STAKE);
+
+        vm.prank(validator);
         jury.validationResponse(requestHash, 80, "ipfs://resp-1", bytes32(0), tag);
 
         escrow.finalizeTask(taskId);
@@ -331,9 +338,22 @@ contract TaskEscrowV2Test is Test {
         vm.prank(community);
         escrow.addTaskValidationRequest(taskId, requestHash2);
 
-        vm.prank(address(0xBEEF));
+        address validator1 = address(0xBEEF);
+        address validator2 = address(0xCAFE);
+        stakingToken.mint(validator1, 1000 ether);
+        stakingToken.mint(validator2, 1000 ether);
+        vm.prank(validator1);
+        stakingToken.approve(address(jury), type(uint256).max);
+        vm.prank(validator2);
+        stakingToken.approve(address(jury), type(uint256).max);
+        vm.prank(validator1);
+        jury.registerJuror(MIN_STAKE);
+        vm.prank(validator2);
+        jury.registerJuror(MIN_STAKE);
+
+        vm.prank(validator1);
         jury.validationResponse(requestHash1, 80, "ipfs://resp-1", bytes32(0), tag);
-        vm.prank(address(0xBEEF));
+        vm.prank(validator1);
         jury.validationResponse(requestHash2, 80, "ipfs://resp-2", bytes32(0), tag);
 
         vm.warp(block.timestamp + 4 days);
@@ -341,7 +361,7 @@ contract TaskEscrowV2Test is Test {
         vm.expectRevert(TaskEscrowV2.ValidationsNotSatisfied.selector);
         escrow.finalizeTask(taskId);
 
-        vm.prank(address(0xCAFE));
+        vm.prank(validator2);
         jury.validationResponse(requestHash2, 80, "ipfs://resp-3", bytes32(0), tag);
 
         escrow.finalizeTask(taskId);
@@ -551,7 +571,14 @@ contract TaskEscrowV2Test is Test {
         vm.prank(community);
         escrow.addTaskValidationRequest(taskId, requestHash);
 
-        vm.prank(address(0xBEEF));
+        address validator = address(0xBEEF);
+        stakingToken.mint(validator, 1000 ether);
+        vm.prank(validator);
+        stakingToken.approve(address(jury), type(uint256).max);
+        vm.prank(validator);
+        jury.registerJuror(MIN_STAKE);
+
+        vm.prank(validator);
         jury.validationResponse(requestHash, 80, "ipfs://resp-1", bytes32(0), tag);
 
         vm.warp(block.timestamp + 4 days);

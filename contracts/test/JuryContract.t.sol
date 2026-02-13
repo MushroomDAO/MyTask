@@ -257,18 +257,25 @@ contract JuryContractTest is Test {
         vm.prank(taskCreator);
         jury.validationRequest(address(jury), AGENT_ID, "ipfs://request", requestHash);
 
-        vm.prank(address(0xBEEF));
+        address validator = address(0xBEEF);
+        stakingToken.mint(validator, 1000 ether);
+        vm.prank(validator);
+        stakingToken.approve(address(jury), type(uint256).max);
+        vm.prank(validator);
+        jury.registerJuror(MIN_STAKE);
+
+        vm.prank(validator);
         vm.expectRevert("Missing role");
         jury.validationResponse(requestHash, 80, "ipfs://resp", bytes32(0), tag);
 
-        jury.grantRole(role, address(0xBEEF));
+        jury.grantRole(role, validator);
 
-        vm.prank(address(0xBEEF));
+        vm.prank(validator);
         jury.validationResponse(requestHash, 80, "ipfs://resp", bytes32(0), tag);
 
         (address validatorAddress, uint256 agentId, uint8 response, bytes32 statusTag, uint256 lastUpdate) =
             jury.getValidationStatus(requestHash);
-        assertEq(validatorAddress, address(0xBEEF));
+        assertEq(validatorAddress, validator);
         assertEq(agentId, AGENT_ID);
         assertEq(response, 80);
         assertEq(statusTag, tag);
@@ -279,6 +286,12 @@ contract JuryContractTest is Test {
         bytes32 requestHash = keccak256("request-self-validate");
         vm.prank(taskCreator);
         jury.validationRequest(address(jury), AGENT_ID, "ipfs://request", requestHash);
+
+        stakingToken.mint(taskCreator, 1000 ether);
+        vm.prank(taskCreator);
+        stakingToken.approve(address(jury), type(uint256).max);
+        vm.prank(taskCreator);
+        jury.registerJuror(MIN_STAKE);
 
         vm.prank(taskCreator);
         vm.expectRevert("Conflict of interest");
@@ -294,8 +307,27 @@ contract JuryContractTest is Test {
         jury.validationRequest(address(jury), agentId, "ipfs://request", requestHash);
 
         vm.prank(juror1);
+        jury.registerJuror(MIN_STAKE);
+        vm.prank(juror1);
         vm.expectRevert("Conflict of interest");
         jury.validationResponse(requestHash, 80, "ipfs://resp", bytes32(0), bytes32("TAG"));
+    }
+
+    function test_ValidationResponseRejectsInvalidScore() public {
+        address validator = address(0xBEEF);
+        stakingToken.mint(validator, 1000 ether);
+        vm.prank(validator);
+        stakingToken.approve(address(jury), type(uint256).max);
+        vm.prank(validator);
+        jury.registerJuror(MIN_STAKE);
+
+        bytes32 requestHash = keccak256("invalid-score");
+        vm.prank(taskCreator);
+        jury.validationRequest(address(jury), AGENT_ID, "ipfs://request", requestHash);
+
+        vm.prank(validator);
+        vm.expectRevert("Invalid response score");
+        jury.validationResponse(requestHash, 101, "ipfs://resp", bytes32(0), bytes32("TAG"));
     }
 
     function test_VoteRejectsTaskCreator() public {
