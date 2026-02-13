@@ -501,6 +501,7 @@ MyTask 的链上流程涉及多角色、多合约、多脚本联动。为了让�
 1. **x402 Proxy Dashboard + 结构化日志**（`agent-mock/x402-proxy.js`）
    - Dashboard: `GET /`, `GET /stats`, `GET /receipts`
    - 防滥用：按 IP/按 payer 限流、body 大小限制、仅允许 JSON
+   - 存储加固：`accounting.json` 原子写入 + 破损自动恢复
 2. **Indexer Dashboard + JSON API**（`agent-mock/indexer.js`）
    - 运行：`node indexer.js --serve true --port 8790`
    - API: `/tasks`, `/validations`, `/agents`, `/alerts`, `/state`

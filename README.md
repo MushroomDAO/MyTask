@@ -95,6 +95,7 @@ flowchart TB
 - **Local x402 proxy (dashboard + hardening)**: `agent-mock/x402-proxy.js` + `agent-mock/sponsor-policy.json`
   - Dashboard: `GET /`, `GET /stats`, `GET /receipts`
   - Abuse prevention: `X402_RATE_LIMIT_IP`, `X402_RATE_LIMIT_PAYER`, `X402_RATE_WINDOW_MS`, `X402_MAX_BODY_BYTES`
+  - Storage hardening: atomic writes + corruption recovery for `accounting.json`
 - **Validation + receipts indexer (events → JSON state + dashboard)**: `agent-mock/indexer.js`
   - Dashboard: `node indexer.js --serve true --port 8790` (also exposes `/tasks`, `/validations`, `/agents`, `/alerts`)
 - **Task orchestrator demo (structured logs)**: `agent-mock/gasless-link-jury-validation.js --mode orchestrateTasks` (logs include `ts` + `event`)
@@ -269,6 +270,7 @@ MIT License - Open source and permissionless.
 - **本地 x402 Proxy（Dashboard + 加固）**：`agent-mock/x402-proxy.js` + `agent-mock/sponsor-policy.json`
   - Dashboard：`GET /`, `GET /stats`, `GET /receipts`
   - 防滥用参数：`X402_RATE_LIMIT_IP`, `X402_RATE_LIMIT_PAYER`, `X402_RATE_WINDOW_MS`, `X402_MAX_BODY_BYTES`
+  - 存储加固：`accounting.json` 原子写入 + 破损自动恢复
 - **验证与回执索引器（events → JSON state + Dashboard）**：`agent-mock/indexer.js`
   - Dashboard：`node indexer.js --serve true --port 8790`（也提供 `/tasks`, `/validations`, `/agents`, `/alerts`）
 - **任务编排 Demo（结构化日志）**：`agent-mock/gasless-link-jury-validation.js --mode orchestrateTasks`（日志包含 `ts` + `event`）

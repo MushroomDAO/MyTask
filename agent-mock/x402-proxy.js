@@ -23,8 +23,38 @@ function readJson(filePath, fallback) {
   }
 }
 
-function writeJson(filePath, obj) {
-  fs.writeFileSync(filePath, JSON.stringify(obj, null, 2));
+function atomicWriteFile(filePath, data) {
+  const dir = path.dirname(filePath);
+  const base = path.basename(filePath);
+  const tmpPath = path.join(dir, `.${base}.tmp-${process.pid}-${Date.now()}`);
+  try {
+    fs.writeFileSync(tmpPath, data);
+    fs.renameSync(tmpPath, filePath);
+  } catch (e) {
+    try {
+      if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+    } catch {}
+    throw e;
+  }
+}
+
+function writeJsonAtomic(filePath, obj) {
+  atomicWriteFile(filePath, JSON.stringify(obj, null, 2));
+}
+
+function readJsonRecovering(filePath, fallback) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    try {
+      if (fs.existsSync(filePath)) {
+        const recoveredPath = `${filePath}.corrupt-${Date.now()}`;
+        fs.renameSync(filePath, recoveredPath);
+        logEvent({ event: "x402.recover", ok: true, kind: "json", filePath, recoveredPath });
+      }
+    } catch {}
+    return fallback;
+  }
 }
 
 function readBody(req, maxBytes) {
@@ -163,11 +193,17 @@ async function main() {
   const receiptsDir = path.join(storeDir, "items");
   ensureDir(receiptsDir);
   const accountingPath = path.join(storeDir, "accounting.json");
+  const loadAccounting = () => {
+    const a = readJsonRecovering(accountingPath, { days: {} });
+    if (!a || typeof a !== "object") return { days: {} };
+    if (!a.days || typeof a.days !== "object") return { ...a, days: {} };
+    return a;
+  };
 
   const server = http.createServer(async (req, res) => {
     const startedAt = Date.now();
     if (req.method === "GET" && req.url === "/") {
-      const accounting = readJson(accountingPath, { days: {} });
+      const accounting = loadAccounting();
       let receipts = [];
       try {
         receipts = fs
@@ -214,7 +250,7 @@ async function main() {
     }
 
     if (req.method === "GET" && req.url === "/stats") {
-      const accounting = readJson(accountingPath, { days: {} });
+      const accounting = loadAccounting();
       let receiptCount = 0;
       try {
         receiptCount = fs.readdirSync(receiptsDir).filter((n) => n.endsWith(".json")).length;
@@ -349,7 +385,7 @@ async function main() {
       return sendJson(res, 403, { error: allow.reason });
     }
 
-    const accounting = readJson(accountingPath, { days: {} });
+    const accounting = loadAccounting();
     const day = todayKey();
     accounting.days[day] = accounting.days[day] ?? { total: "0", bySponsor: {}, byPayer: {} };
     const dayTotal = BigInt(accounting.days[day].total);
@@ -372,7 +408,7 @@ async function main() {
       const cur = BigInt(accounting.days[day].byPayer[payerAddress] ?? "0");
       accounting.days[day].byPayer[payerAddress] = (cur + amountInt).toString();
     }
-    writeJson(accountingPath, accounting);
+    writeJsonAtomic(accountingPath, accounting);
 
     const createdAt = new Date().toISOString();
     const baseReceipt = {
@@ -389,7 +425,7 @@ async function main() {
     const finalReceiptUri = `file://${path.join(receiptsDir, `${receiptId}.json`)}`;
     const receipt = { ...baseReceipt, receiptId, receiptUri: finalReceiptUri };
 
-    writeJson(path.join(receiptsDir, `${receiptId}.json`), receipt);
+    writeJsonAtomic(path.join(receiptsDir, `${receiptId}.json`), receipt);
     logEvent({
       event: "x402.pay",
       ok: true,
