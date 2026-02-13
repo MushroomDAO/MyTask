@@ -92,9 +92,13 @@ flowchart TB
 
 - **ERC-8004 canonical JSON schemas**: `docs/schemas/erc8004-validation-*.schema.json`
 - **x402 receipt schema**: `docs/schemas/x402-receipt.schema.json`
-- **Local x402 proxy + sponsor policy + receipt storage**: `agent-mock/x402-proxy.js` + `agent-mock/sponsor-policy.json`
-- **Validation + receipts indexer (events → JSON state)**: `agent-mock/indexer.js`
-- **Task orchestrator demo**: `agent-mock/gasless-link-jury-validation.js --mode orchestrateTasks`
+- **Local x402 proxy (dashboard + hardening)**: `agent-mock/x402-proxy.js` + `agent-mock/sponsor-policy.json`
+  - Dashboard: `GET /`, `GET /stats`, `GET /receipts`
+  - Abuse prevention: `X402_RATE_LIMIT_IP`, `X402_RATE_LIMIT_PAYER`, `X402_RATE_WINDOW_MS`, `X402_MAX_BODY_BYTES`
+- **Validation + receipts indexer (events → JSON state + dashboard)**: `agent-mock/indexer.js`
+  - Dashboard: `node indexer.js --serve true --port 8790` (also exposes `/tasks`, `/validations`, `/agents`, `/alerts`)
+- **Task orchestrator demo (structured logs)**: `agent-mock/gasless-link-jury-validation.js --mode orchestrateTasks` (logs include `ts` + `event`)
+- **Foundry invariants (TaskEscrowV2)**: `contracts/test/TaskEscrowV2.invariant.t.sol`
 
 ## Agent Interaction Flow
 
@@ -262,9 +266,13 @@ MIT License - Open source and permissionless.
 
 - **ERC-8004 验证请求/响应 JSON Schema**：`docs/schemas/erc8004-validation-*.schema.json`
 - **x402 回执 JSON Schema**：`docs/schemas/x402-receipt.schema.json`
-- **本地 x402 Proxy + 赞助策略 + 回执存储**：`agent-mock/x402-proxy.js` + `agent-mock/sponsor-policy.json`
-- **验证与回执索引器（events → JSON state）**：`agent-mock/indexer.js`
-- **任务编排 Demo（orchestrator）**：`agent-mock/gasless-link-jury-validation.js --mode orchestrateTasks`
+- **本地 x402 Proxy（Dashboard + 加固）**：`agent-mock/x402-proxy.js` + `agent-mock/sponsor-policy.json`
+  - Dashboard：`GET /`, `GET /stats`, `GET /receipts`
+  - 防滥用参数：`X402_RATE_LIMIT_IP`, `X402_RATE_LIMIT_PAYER`, `X402_RATE_WINDOW_MS`, `X402_MAX_BODY_BYTES`
+- **验证与回执索引器（events → JSON state + Dashboard）**：`agent-mock/indexer.js`
+  - Dashboard：`node indexer.js --serve true --port 8790`（也提供 `/tasks`, `/validations`, `/agents`, `/alerts`）
+- **任务编排 Demo（结构化日志）**：`agent-mock/gasless-link-jury-validation.js --mode orchestrateTasks`（日志包含 `ts` + `event`）
+- **Foundry Invariant 测试（TaskEscrowV2）**：`contracts/test/TaskEscrowV2.invariant.t.sol`
 
 ## 架构概览
 

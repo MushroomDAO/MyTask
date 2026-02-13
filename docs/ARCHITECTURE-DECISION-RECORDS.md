@@ -469,19 +469,45 @@ MyTask 涉及真实的经济激励与用户数据。需要符合各地的隐私�
 | 008 | 完整审计追踪 | ✅ 接受 | 透明度 |
 | 009 | DAO 治理 | 🔄 规划 | 长期演进 |
 | 010 | 隐私合规 | ✅ 接受 | 法规符合 |
+| 011 | 可观测性与调试面 | ✅ 接受 | 运维与审计 |
 
 ---
 
 ## 后续决策需要
 
-- [ ] ADR-011: 跨链原子性交换机制
-- [ ] ADR-012: AI 模型更新与版本管理
-- [ ] ADR-013: 性能 SLA 与监控
-- [ ] ADR-014: 争议仲裁机制
-- [ ] ADR-015: 社区激励与空投计划
+- [ ] ADR-012: 跨链原子性交换机制
+- [ ] ADR-013: AI 模型更新与版本管理
+- [ ] ADR-014: 性能 SLA 与监控
+- [ ] ADR-015: 争议仲裁机制
+- [ ] ADR-016: 社区激励与空投计划
 
 ---
 
 **文档维护**: 每个决策应在实施前经过审查，并在后续迭代中更新。
 
-**最后更新**: 2025-11-26
+**最后更新**: 2026-02-13
+
+---
+
+## ADR-011: 可观测性与调试面（Index / Proxy / Orchestrator）
+
+**状态**: ✅ 已接受
+
+**背景**:
+MyTask 的链上流程涉及多角色、多合约、多脚本联动。为了让测试与本地演示可复现、可审计，需要统一的观测面：结构化日志、可视化 Dashboard、以及可导出的事件快照。
+
+**决策**:
+采用三类观测面作为最小可用基线：
+1. **x402 Proxy Dashboard + 结构化日志**（`agent-mock/x402-proxy.js`）
+   - Dashboard: `GET /`, `GET /stats`, `GET /receipts`
+   - 防滥用：按 IP/按 payer 限流、body 大小限制、仅允许 JSON
+2. **Indexer Dashboard + JSON API**（`agent-mock/indexer.js`）
+   - 运行：`node indexer.js --serve true --port 8790`
+   - API: `/tasks`, `/validations`, `/agents`, `/alerts`, `/state`
+3. **Orchestrator 结构化日志**（`agent-mock/gasless-link-jury-validation.js`）
+   - 输出统一包含 `ts` 与 `event` 字段，便于后续接入聚合与告警
+
+**影响**:
+- 本地演示可用一个 URL 快速定位任务/回执/验证状态
+- 关键动作可通过日志与快照复盘（包括失败路径）
+- 为 Milestone 4 的“生产加固”（限流、告警、事件响应）提供基础
