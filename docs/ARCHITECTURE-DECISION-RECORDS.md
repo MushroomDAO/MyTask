@@ -500,13 +500,22 @@ MyTask 的链上流程涉及多角色、多合约、多脚本联动。为了让�
 采用三类观测面作为最小可用基线：
 1. **x402 Proxy Dashboard + 结构化日志**（`agent-mock/x402-proxy.js`）
    - Dashboard: `GET /`, `GET /stats`, `GET /receipts`
+   - Metrics: `GET /metrics`（包含运行时 counters 与今日聚合）
    - 防滥用：按 IP/按 payer 限流、body 大小限制、仅允许 JSON
    - 存储加固：`accounting.json` 原子写入 + 破损自动恢复
+   - Trace：支持 `x-trace-id` 请求头透传到日志
+   - 持久化：支持 `--logFile`/`--logMaxBytes`（或 `X402_LOG_FILE`/`X402_LOG_MAX_BYTES`）写入与滚动
 2. **Indexer Dashboard + JSON API**（`agent-mock/indexer.js`）
    - 运行：`node indexer.js --serve true --port 8790`
-   - API: `/tasks`, `/validations`, `/agents`, `/alerts`, `/state`
+   - API: `/tasks`, `/validations`, `/rewards`, `/agents`, `/alerts`, `/state`, `/metrics`
+   - 增量：支持 cursor/resume（`--cursorFile`/`--resume`）与 confirmations（`--confirmations`）控制重扫与抗重组
+   - Reward 索引：可选 `--rewardAction`（或 `REWARD_ACTION_ADDRESS`）拉取 MyShop action 事件并按 `taskId` 归档
+   - 持久化：支持 `--logFile`/`--logMaxBytes`（或 `INDEXER_LOG_FILE`/`INDEXER_LOG_MAX_BYTES`）写入与滚动
 3. **Orchestrator 结构化日志**（`agent-mock/gasless-link-jury-validation.js`）
    - 输出统一包含 `ts` 与 `event` 字段，便于后续接入聚合与告警
+   - Trace：任务内链路使用 `taskId` 作为 traceId，并透传到 x402 的 `x-trace-id` 请求头
+   - 持久化：支持 `--logFile`/`--logMaxBytes`（或 `ORCHESTRATOR_LOG_FILE`/`ORCHESTRATOR_LOG_MAX_BYTES`）写入与滚动
+   - Reward 绑定：默认将 reward 的 `extraData` 编码为 `abi.encode(bytes32 taskId, bytes32 juryTaskHash)`，便于链上可追溯
 
 **影响**:
 - 本地演示可用一个 URL 快速定位任务/回执/验证状态

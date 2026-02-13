@@ -3,6 +3,7 @@ const {
   createPublicClient,
   createWalletClient,
   http,
+  encodeAbiParameters,
   encodeFunctionData,
   concat,
   pad,
@@ -447,13 +448,13 @@ async function main() {
       return await publicClient.request({ method, params });
     };
 
-    const x402Pay = async ({ url, method, amount, payerAddress }) => {
+    const x402Pay = async ({ url, method, amount, payerAddress, traceId }) => {
       if (!x402ProxyUrl) return null;
       return await withRetries(
         async () => {
           const res = await fetch(`${x402ProxyUrl.replace(/\/$/, "")}/pay`, {
             method: "POST",
-            headers: { "content-type": "application/json" },
+            headers: { "content-type": "application/json", "x-trace-id": traceId ?? "" },
             body: JSON.stringify({
               url,
               method,
@@ -550,7 +551,7 @@ async function main() {
 
           if (!receiptUri && x402ProxyUrl && BigInt(x402TaskAmount) > 0n) {
             try {
-              receiptUri = await x402Pay({ url: evidenceUri, method: "EVIDENCE", amount: x402TaskAmount, payerAddress: account.address });
+              receiptUri = await x402Pay({ url: evidenceUri, method: "EVIDENCE", amount: x402TaskAmount, payerAddress: account.address, traceId });
               logTaskEvent({ event: "orchestrator.x402Pay", ok: true, mode, kind: "task", receiptUri });
             } catch (e) {
               logTaskEvent({ event: "orchestrator.x402PayFailed", ok: false, mode, kind: "task", error: String(e) });
@@ -681,7 +682,13 @@ async function main() {
 
             if (!validationReceiptUri && x402ProxyUrl && BigInt(x402ValidationAmount) > 0n) {
               try {
-                validationReceiptUri = await x402Pay({ url: validationRequestUri, method: "VALIDATION", amount: x402ValidationAmount, payerAddress: communityAccount.address });
+                validationReceiptUri = await x402Pay({
+                  url: validationRequestUri,
+                  method: "VALIDATION",
+                  amount: x402ValidationAmount,
+                  payerAddress: communityAccount.address,
+                  traceId
+                });
                 logEvent({ event: "orchestrator.x402Pay", mode, kind: "validation", receiptUri: validationReceiptUri });
               } catch (e) {
                 logEvent({ event: "orchestrator.x402PayFailed", mode, kind: "validation", error: String(e) });
@@ -789,13 +796,9 @@ async function main() {
               ? rewardExtraDataHexRaw
               : rewardExtraDataHexRaw
                 ? `0x${rewardExtraDataHexRaw}`
-                : toHex(
-                    JSON.stringify({
-                      taskId: String(taskId),
-                      juryTaskHash: String(finalTask.juryTaskHash),
-                      taskor: String(finalTask.taskor),
-                      community: String(finalTask.community)
-                    })
+                : encodeAbiParameters(
+                    [{ name: "taskId", type: "bytes32" }, { name: "juryTaskHash", type: "bytes32" }],
+                    [taskId, finalTask.juryTaskHash]
                   );
 
           const rewardData = encodeFunctionData({

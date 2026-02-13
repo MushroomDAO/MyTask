@@ -2,7 +2,7 @@
 const nodeHttp = require("http");
 const fs = require("fs");
 const path = require("path");
-const { createPublicClient, http, decodeEventLog, keccak256, toHex } = require("viem");
+const { createPublicClient, http, decodeAbiParameters, decodeEventLog, keccak256, toHex } = require("viem");
 require("dotenv").config({ path: path.join(process.cwd(), ".env") });
 
 function requireEnv(name) {
@@ -131,6 +131,9 @@ async function main() {
   const juryContract = normalizeHexAddress(
     getArgValue(argv, "--juryContract") ?? process.env.JURY_CONTRACT_ADDRESS ?? requireEnv("JURY_CONTRACT_ADDRESS")
   );
+  const rewardAction = normalizeHexAddress(
+    getArgValue(argv, "--rewardAction") ?? process.env.REWARD_ACTION_ADDRESS ?? null
+  );
 
   const outFile =
     getArgValue(argv, "--out") ?? process.env.INDEXER_OUT ?? path.join(process.cwd(), "out", "index.json");
@@ -179,6 +182,7 @@ async function main() {
     chainId,
     taskEscrow,
     juryContract,
+    rewardAction,
     fromBlock: fromBlock.toString(),
     toBlock: toBlock.toString(),
     latestBlock: latestBlock.toString(),
@@ -337,6 +341,7 @@ async function main() {
       rpcUrl,
       taskEscrow,
       juryContract,
+      rewardAction,
       fromBlock: fromBlock.toString(),
       toBlock: toBlock.toString(),
       confirmations: confirmations.toString(),
@@ -349,6 +354,7 @@ async function main() {
     receipts: {},
     validations: {},
     agents: {},
+    rewards: [],
     alerts: []
   };
 
@@ -399,6 +405,54 @@ async function main() {
     }
   };
 
+  const rewardActionAbi = [
+    {
+      type: "event",
+      name: "ActionEvent",
+      anonymous: false,
+      inputs: [
+        { indexed: true, name: "buyer", type: "address" },
+        { indexed: true, name: "recipient", type: "address" },
+        { indexed: true, name: "itemId", type: "uint256" },
+        { indexed: false, name: "shopId", type: "uint256" },
+        { indexed: false, name: "quantity", type: "uint256" },
+        { indexed: false, name: "actionData", type: "bytes" },
+        { indexed: false, name: "extraData", type: "bytes" }
+      ]
+    }
+  ];
+
+  const ingestRewardActionLog = (log) => {
+    const decoded = ingestEvent(rewardActionAbi, log);
+    if (!decoded || decoded.name !== "ActionEvent") return;
+    const extraData = decoded.args.extraData;
+    let taskId = null;
+    let juryTaskHash = null;
+    try {
+      const parsed = decodeAbiParameters([{ type: "bytes32" }, { type: "bytes32" }], extraData);
+      taskId = parsed[0];
+      juryTaskHash = parsed[1];
+    } catch {}
+
+    const reward = {
+      blockNumber: toNumberSafe(log.blockNumber),
+      buyer: decoded.args.buyer,
+      recipient: decoded.args.recipient,
+      itemId: decoded.args.itemId?.toString?.() ?? String(decoded.args.itemId),
+      shopId: decoded.args.shopId?.toString?.() ?? String(decoded.args.shopId),
+      quantity: decoded.args.quantity?.toString?.() ?? String(decoded.args.quantity),
+      taskId,
+      juryTaskHash,
+      extraData
+    };
+    state.rewards.push(reward);
+    if (taskId) {
+      state.tasks[taskId] = state.tasks[taskId] ?? { taskId, events: [] };
+      state.tasks[taskId].rewards = state.tasks[taskId].rewards ?? [];
+      state.tasks[taskId].rewards.push(reward);
+    }
+  };
+
   if (fromBlock <= toBlock) {
     for (let start = fromBlock; start <= toBlock; start += chunkSize) {
       const end = start + chunkSize - 1n <= toBlock ? start + chunkSize - 1n : toBlock;
@@ -407,6 +461,10 @@ async function main() {
       for (const log of taskChunk) ingestTaskEscrowLog(log);
       const juryChunk = await publicClient.getLogs({ address: juryContract, fromBlock: start, toBlock: end });
       for (const log of juryChunk) ingestJuryLog(log);
+      if (rewardAction) {
+        const rewardChunk = await publicClient.getLogs({ address: rewardAction, fromBlock: start, toBlock: end });
+        for (const log of rewardChunk) ingestRewardActionLog(log);
+      }
     }
   }
 
@@ -542,6 +600,7 @@ async function main() {
     tasks: Object.keys(state.tasks).length,
     validations: Object.keys(state.validations).length,
     agents: Object.keys(state.agents).length,
+    rewards: state.rewards.length,
     alerts: state.alerts.length
   };
   process.stdout.write(JSON.stringify(summary) + "\n");
@@ -566,6 +625,7 @@ async function main() {
     const arr = Object.keys(finalState.tasks).map((taskId) => {
       const t = finalState.tasks[taskId] ?? {};
       const onchain = t.onchain ?? {};
+      const rewards = t.rewards ?? [];
       return {
         taskId,
         status: onchain.status ?? null,
@@ -577,6 +637,7 @@ async function main() {
         deadline: onchain.deadline ?? null,
         challengeDeadline: onchain.challengeDeadline ?? null,
         validationsSatisfied: onchain.validationsSatisfied ?? null,
+        rewardCount: rewards.length,
         metadataUri: onchain.metadataUri ?? null,
         evidenceUri: onchain.evidenceUri ?? null
       };
@@ -608,6 +669,7 @@ async function main() {
         tasks: Object.keys(finalState.tasks).length,
         validations: Object.keys(finalState.validations).length,
         agents: Object.keys(finalState.agents).length,
+        rewards: finalState.rewards?.length ?? 0,
         alerts: finalState.alerts.length
       };
       logEvent({ event: "indexer.http", ok: true, traceId, method: req.method, path: p, code: 200 });
@@ -643,6 +705,11 @@ async function main() {
     if (req.method === "GET" && p === "/validations") {
       logEvent({ event: "indexer.http", ok: true, traceId, method: req.method, path: p, code: 200 });
       return sendJson(res, 200, { ok: true, validations: flattenValidations() });
+    }
+
+    if (req.method === "GET" && p === "/rewards") {
+      logEvent({ event: "indexer.http", ok: true, traceId, method: req.method, path: p, code: 200 });
+      return sendJson(res, 200, { ok: true, rewards: finalState.rewards ?? [] });
     }
 
     if (req.method === "GET" && p.startsWith("/agents/")) {
@@ -683,6 +750,7 @@ async function main() {
       <li><a href="/health">/health</a></li>
       <li><a href="/tasks">/tasks</a></li>
       <li><a href="/validations">/validations</a></li>
+      <li><a href="/rewards">/rewards</a></li>
       <li><a href="/agents">/agents</a></li>
       <li><a href="/alerts">/alerts</a></li>
       <li><a href="/state">/state</a></li>
