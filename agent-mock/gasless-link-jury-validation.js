@@ -32,6 +32,12 @@ function parseBool(v, defaultValue) {
   throw new Error(`Invalid boolean: ${v}`);
 }
 
+function logEvent(obj) {
+  try {
+    process.stdout.write(JSON.stringify({ ts: new Date().toISOString(), ...obj }) + "\n");
+  } catch {}
+}
+
 async function bundlerRpc(url, method, params) {
   const res = await fetch(url, {
     method: "POST",
@@ -89,7 +95,7 @@ async function main() {
       onLogs: (logs) => {
         for (const log of logs) {
           const args = log.args ?? {};
-          process.stdout.write(JSON.stringify({ mode, address: taskEscrow, log: { ...log, args } }) + "\n");
+          logEvent({ event: "orchestrator.evidenceSubmitted", mode, address: taskEscrow, log: { ...log, args } });
           if (once) {
             unwatch();
             process.exit(0);
@@ -303,7 +309,7 @@ async function main() {
     const sendTx = async ({ to, data, wallet }) => {
       const from = wallet.account.address;
       if (dryRun) {
-        process.stdout.write(JSON.stringify({ to, data, from, dryRun: true }) + "\n");
+        logEvent({ event: "orchestrator.dryRunTx", mode, to, from, data });
         return null;
       }
       const hash = await wallet.sendTransaction({ to, data, value: 0n });
@@ -370,7 +376,7 @@ async function main() {
               args: [taskId]
             });
             const txHash = await sendTx({ to: taskEscrow, data, wallet: walletClient });
-            process.stdout.write(JSON.stringify({ mode, action: "acceptTask", taskId, txHash }) + "\n");
+            logEvent({ event: "orchestrator.acceptTask", mode, taskId, txHash });
           }
 
           if (shouldSubmit) {
@@ -380,9 +386,7 @@ async function main() {
               args: [taskId, evidenceUri]
             });
             const txHash = await sendTx({ to: taskEscrow, data, wallet: walletClient });
-            process.stdout.write(
-              JSON.stringify({ mode, action: "submitWork", taskId, evidenceUri, txHash }) + "\n"
-            );
+            logEvent({ event: "orchestrator.submitWork", mode, taskId, evidenceUri, txHash });
 
             if (!receiptUri && x402ProxyUrl && BigInt(x402TaskAmount) > 0n) {
               try {
@@ -392,9 +396,9 @@ async function main() {
                   amount: x402TaskAmount,
                   payerAddress: account.address
                 });
-                process.stdout.write(JSON.stringify({ mode, action: "x402Pay", kind: "task", receiptUri }) + "\n");
+                logEvent({ event: "orchestrator.x402Pay", mode, kind: "task", receiptUri });
               } catch (e) {
-                process.stdout.write(JSON.stringify({ mode, action: "x402PayFailed", kind: "task", error: String(e) }) + "\n");
+                logEvent({ event: "orchestrator.x402PayFailed", mode, kind: "task", error: String(e) });
               }
             }
 
@@ -406,9 +410,7 @@ async function main() {
                 args: [taskId, receiptId, receiptUri]
               });
               const linkReceiptTxHash = await sendTx({ to: taskEscrow, data: linkReceiptData, wallet: walletClient });
-              process.stdout.write(
-                JSON.stringify({ mode, action: "linkReceipt", taskId, receiptId, receiptUri, txHash: linkReceiptTxHash }) + "\n"
-              );
+              logEvent({ event: "orchestrator.linkReceipt", mode, taskId, receiptId, receiptUri, txHash: linkReceiptTxHash });
             }
 
             if (validationMinCount > 0n && String(task.community).toLowerCase() === communityAccount.address.toLowerCase()) {
@@ -418,18 +420,16 @@ async function main() {
                 args: [taskId, validationTag, validationMinCount, validationMinAvg, validationMinUnique]
               });
               const setReqTxHash = await sendTx({ to: taskEscrow, data: setReqData, wallet: communityWalletClient });
-              process.stdout.write(
-                JSON.stringify({
-                  mode,
-                  action: "setTaskValidationRequirementWithValidators",
-                  taskId,
-                  tag: validationTag,
-                  minCount: validationMinCount.toString(),
-                  minAvg: validationMinAvg,
-                  minUnique: validationMinUnique,
-                  txHash: setReqTxHash
-                }) + "\n"
-              );
+              logEvent({
+                event: "orchestrator.setTaskValidationRequirementWithValidators",
+                mode,
+                taskId,
+                tag: validationTag,
+                minCount: validationMinCount.toString(),
+                minAvg: validationMinAvg,
+                minUnique: validationMinUnique,
+                txHash: setReqTxHash
+              });
             }
 
             const juryAbi = [
@@ -483,9 +483,7 @@ async function main() {
                 args: [juryContractAddress, agentId, validationRequestUri, requestHash]
               });
               const reqTxHash = await sendTx({ to: juryContractAddress, data: reqData, wallet: communityWalletClient });
-              process.stdout.write(
-                JSON.stringify({ mode, action: "validationRequest", requestHash, requestUri: validationRequestUri, txHash: reqTxHash }) + "\n"
-              );
+              logEvent({ event: "orchestrator.validationRequest", mode, requestHash, requestUri: validationRequestUri, txHash: reqTxHash });
 
               const addReqData = encodeFunctionData({
                 abi: taskEscrowAbi,
@@ -493,9 +491,7 @@ async function main() {
                 args: [taskId, requestHash]
               });
               const addReqTxHash = await sendTx({ to: taskEscrow, data: addReqData, wallet: walletClient });
-              process.stdout.write(
-                JSON.stringify({ mode, action: "addTaskValidationRequest", taskId, requestHash, txHash: addReqTxHash }) + "\n"
-              );
+              logEvent({ event: "orchestrator.addTaskValidationRequest", mode, taskId, requestHash, txHash: addReqTxHash });
 
               if (!validationReceiptUri && x402ProxyUrl && BigInt(x402ValidationAmount) > 0n) {
                 try {
@@ -505,9 +501,9 @@ async function main() {
                     amount: x402ValidationAmount,
                     payerAddress: communityAccount.address
                   });
-                  process.stdout.write(JSON.stringify({ mode, action: "x402Pay", kind: "validation", receiptUri: validationReceiptUri }) + "\n");
+                  logEvent({ event: "orchestrator.x402Pay", mode, kind: "validation", receiptUri: validationReceiptUri });
                 } catch (e) {
-                  process.stdout.write(JSON.stringify({ mode, action: "x402PayFailed", kind: "validation", error: String(e) }) + "\n");
+                  logEvent({ event: "orchestrator.x402PayFailed", mode, kind: "validation", error: String(e) });
                 }
               }
 
@@ -523,16 +519,14 @@ async function main() {
                   data: linkValidationReceiptData,
                   wallet: communityWalletClient
                 });
-                process.stdout.write(
-                  JSON.stringify({
-                    mode,
-                    action: "linkReceiptToValidation",
-                    requestHash,
-                    receiptId: validationReceiptId,
-                    receiptUri: validationReceiptUri,
-                    txHash: linkValidationReceiptTxHash
-                  }) + "\n"
-                );
+                logEvent({
+                  event: "orchestrator.linkReceiptToValidation",
+                  mode,
+                  requestHash,
+                  receiptId: validationReceiptId,
+                  receiptUri: validationReceiptUri,
+                  txHash: linkValidationReceiptTxHash
+                });
               }
 
               const respData = encodeFunctionData({
@@ -541,17 +535,15 @@ async function main() {
                 args: [requestHash, validationScore, validationResponseUri, "0x0000000000000000000000000000000000000000000000000000000000000000", validationTag]
               });
               const respTxHash = await sendTx({ to: juryContractAddress, data: respData, wallet: validatorWalletClient });
-              process.stdout.write(
-                JSON.stringify({
-                  mode,
-                  action: "validationResponse",
-                  requestHash,
-                  score: validationScore,
-                  responseUri: validationResponseUri,
-                  tag: validationTag,
-                  txHash: respTxHash
-                }) + "\n"
-              );
+              logEvent({
+                event: "orchestrator.validationResponse",
+                mode,
+                requestHash,
+                score: validationScore,
+                responseUri: validationResponseUri,
+                tag: validationTag,
+                txHash: respTxHash
+              });
             }
 
             if (autoFinalize) {
@@ -571,9 +563,9 @@ async function main() {
                 try {
                   await rpcRequest("evm_increaseTime", [Number(delta)]);
                   await rpcRequest("evm_mine", []);
-                  process.stdout.write(JSON.stringify({ mode, action: "fastForward", seconds: Number(delta) }) + "\n");
+                  logEvent({ event: "orchestrator.fastForward", mode, seconds: Number(delta) });
                 } catch (e) {
-                  process.stdout.write(JSON.stringify({ mode, action: "fastForwardFailed", error: String(e) }) + "\n");
+                  logEvent({ event: "orchestrator.fastForwardFailed", mode, error: String(e) });
                 }
               }
 
@@ -587,15 +579,13 @@ async function main() {
                     args: [taskId]
                   });
                 } catch {}
-                process.stdout.write(
-                  JSON.stringify({
-                    mode,
-                    action: "manualFinalizeRequired",
-                    taskId,
-                    challengeDeadline: refreshed.challengeDeadline,
-                    validationsSatisfied: satisfied
-                  }) + "\n"
-                );
+                logEvent({
+                  event: "orchestrator.manualFinalizeRequired",
+                  mode,
+                  taskId,
+                  challengeDeadline: refreshed.challengeDeadline,
+                  validationsSatisfied: satisfied
+                });
                 if (once) {
                   unwatch();
                   process.exit(0);
@@ -611,9 +601,9 @@ async function main() {
 
               try {
                 const finalizeTxHash = await sendTx({ to: taskEscrow, data: finalizeData, wallet: walletClient });
-                process.stdout.write(JSON.stringify({ mode, action: "finalizeTask", taskId, txHash: finalizeTxHash }) + "\n");
+                logEvent({ event: "orchestrator.finalizeTask", mode, taskId, txHash: finalizeTxHash });
               } catch (e) {
-                process.stdout.write(JSON.stringify({ mode, action: "finalizeFailed", taskId, error: String(e) }) + "\n");
+                logEvent({ event: "orchestrator.finalizeFailed", mode, taskId, error: String(e) });
               }
             }
           }
