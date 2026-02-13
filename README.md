@@ -98,6 +98,7 @@ flowchart TB
   - Storage hardening: atomic writes + corruption recovery for `accounting.json`
 - **Validation + receipts indexer (events → JSON state + dashboard)**: `agent-mock/indexer.js`
   - Dashboard: `node indexer.js --serve true --port 8790` (also exposes `/tasks`, `/validations`, `/agents`, `/alerts`)
+  - Reputation snapshot: `GET /reputation/:agentId` returns `{ reputation, canonical, digest }` for portable verification
 - **Task orchestrator demo (structured logs)**: `agent-mock/gasless-link-jury-validation.js --mode orchestrateTasks` (logs include `ts` + `event`)
 - **Foundry invariants (TaskEscrowV2)**: `contracts/test/TaskEscrowV2.invariant.t.sol`
 
@@ -220,6 +221,12 @@ cd agent-mock
 npm run index -- --out out/index.json
 ```
 
+Fetch a portable reputation snapshot (canonical JSON + digest):
+
+```bash
+curl http://localhost:8790/reputation/1
+```
+
 ## Documentation
 
 | Document | Description |
@@ -227,6 +234,7 @@ npm run index -- --out out/index.json
 | [Architecture Synthesis](docs/REFERENCE-ARCHITECTURE-SYNTHESIS.md) | Complete system design |
 | [Integration Guide](docs/INTEGRATION-QUICK-START.md) | Quick start for developers |
 | [ADRs](docs/ARCHITECTURE-DECISION-RECORDS.md) | Key design decisions |
+| [Reputation Snapshot](docs/ReputationSnapshot.md) | Canonical payload and digest verification |
 | [PayBot Analysis](docs/PayBot-Core-Abstraction-Analysis.md) | Gasless payment deep-dive |
 | [Hubble Integration](docs/HubbleAITrading-Integration-Solution.md) | Multi-agent architecture |
 
@@ -273,6 +281,7 @@ MIT License - Open source and permissionless.
   - 存储加固：`accounting.json` 原子写入 + 破损自动恢复
 - **验证与回执索引器（events → JSON state + Dashboard）**：`agent-mock/indexer.js`
   - Dashboard：`node indexer.js --serve true --port 8790`（也提供 `/tasks`, `/validations`, `/agents`, `/alerts`）
+  - 信誉快照：`GET /reputation/:agentId` 返回 `{ reputation, canonical, digest }`，便于跨环境校验
 - **任务编排 Demo（结构化日志）**：`agent-mock/gasless-link-jury-validation.js --mode orchestrateTasks`（日志包含 `ts` + `event`）
 - **Foundry Invariant 测试（TaskEscrowV2）**：`contracts/test/TaskEscrowV2.invariant.t.sol`
 
