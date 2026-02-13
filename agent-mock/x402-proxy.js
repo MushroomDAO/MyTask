@@ -27,10 +27,20 @@ function writeJson(filePath, obj) {
   fs.writeFileSync(filePath, JSON.stringify(obj, null, 2));
 }
 
-function readBody(req) {
+function readBody(req, maxBytes) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on("data", (c) => chunks.push(c));
+    let total = 0;
+    req.on("data", (c) => {
+      total += c.length;
+      if (maxBytes && total > maxBytes) {
+        try {
+          req.destroy();
+        } catch {}
+        return reject(Object.assign(new Error("body-too-large"), { code: "body-too-large" }));
+      }
+      chunks.push(c);
+    });
     req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
     req.on("error", reject);
   });
@@ -103,11 +113,51 @@ function logEvent(obj) {
   } catch {}
 }
 
+function getClientIp(req) {
+  const xf = req.headers["x-forwarded-for"];
+  const ip = Array.isArray(xf) ? xf[0] : xf;
+  if (ip) return String(ip).split(",")[0].trim();
+  return req.socket?.remoteAddress ?? "unknown";
+}
+
+function parsePositiveInt(v, fallback) {
+  if (v === undefined || v === null || v === "") return fallback;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return Math.floor(n);
+}
+
+function createWindowCounter({ windowMs, limit }) {
+  const buckets = new Map();
+  const consume = (key) => {
+    if (!limit || limit <= 0) return { ok: true, remaining: null, resetMs: windowMs };
+    const now = Date.now();
+    const b = buckets.get(key);
+    if (!b || now - b.startMs >= windowMs) {
+      const next = { startMs: now, count: 1 };
+      buckets.set(key, next);
+      return { ok: true, remaining: Math.max(0, limit - 1), resetMs: windowMs };
+    }
+    if (b.count >= limit) {
+      return { ok: false, remaining: 0, resetMs: Math.max(0, windowMs - (now - b.startMs)) };
+    }
+    b.count += 1;
+    return { ok: true, remaining: Math.max(0, limit - b.count), resetMs: Math.max(0, windowMs - (now - b.startMs)) };
+  };
+  return { consume };
+}
+
 async function main() {
   const argv = process.argv.slice(2);
   const port = Number(getArgValue(argv, "--port") ?? process.env.X402_PROXY_PORT ?? "8787");
   const storeDir = getArgValue(argv, "--storeDir") ?? process.env.X402_STORE_DIR ?? path.join(process.cwd(), "receipts");
   const policyFile = getArgValue(argv, "--policy") ?? process.env.X402_POLICY_FILE ?? path.join(process.cwd(), "sponsor-policy.json");
+  const maxBodyBytes = parsePositiveInt(process.env.X402_MAX_BODY_BYTES, 64 * 1024);
+  const rateWindowMs = parsePositiveInt(process.env.X402_RATE_WINDOW_MS, 60_000);
+  const rateIpPerWindow = parsePositiveInt(process.env.X402_RATE_LIMIT_IP, 60);
+  const ratePayerPerWindow = parsePositiveInt(process.env.X402_RATE_LIMIT_PAYER, 120);
+  const ipLimiter = createWindowCounter({ windowMs: rateWindowMs, limit: rateIpPerWindow });
+  const payerLimiter = createWindowCounter({ windowMs: rateWindowMs, limit: ratePayerPerWindow });
 
   ensureDir(storeDir);
   const receiptsDir = path.join(storeDir, "items");
@@ -201,7 +251,31 @@ async function main() {
       return sendJson(res, 404, { error: "not-found" });
     }
 
-    const raw = await readBody(req);
+    const clientIp = getClientIp(req);
+    const ipRate = ipLimiter.consume(clientIp);
+    if (!ipRate.ok) {
+      logEvent({ event: "x402.rateLimit", ok: false, kind: "ip", clientIp, resetMs: ipRate.resetMs, ms: Date.now() - startedAt });
+      res.writeHead(429, { "content-type": "application/json", "retry-after": String(Math.ceil(ipRate.resetMs / 1000)) });
+      return res.end(JSON.stringify({ error: "rate-limited", kind: "ip" }));
+    }
+
+    const ct = String(req.headers["content-type"] ?? "");
+    if (!ct.toLowerCase().includes("application/json")) {
+      logEvent({ event: "x402.pay", ok: false, error: "unsupported-content-type", contentType: ct, clientIp, ms: Date.now() - startedAt });
+      return sendJson(res, 415, { error: "unsupported-content-type" });
+    }
+
+    let raw;
+    try {
+      raw = await readBody(req, maxBodyBytes);
+    } catch (e) {
+      const code = e?.code ?? "";
+      if (code === "body-too-large") {
+        logEvent({ event: "x402.pay", ok: false, error: "body-too-large", clientIp, ms: Date.now() - startedAt });
+        return sendJson(res, 413, { error: "body-too-large" });
+      }
+      throw e;
+    }
     let body;
     try {
       body = JSON.parse(raw || "{}");
@@ -224,6 +298,39 @@ async function main() {
     if (!url) {
       logEvent({ event: "x402.pay", ok: false, error: "missing-url", ms: Date.now() - startedAt });
       return sendJson(res, 400, { error: "missing-url" });
+    }
+    if (String(url).length > 2048) {
+      logEvent({ event: "x402.pay", ok: false, error: "url-too-long", ms: Date.now() - startedAt });
+      return sendJson(res, 400, { error: "url-too-long" });
+    }
+    if (String(method).length > 32) {
+      logEvent({ event: "x402.pay", ok: false, error: "method-too-long", ms: Date.now() - startedAt });
+      return sendJson(res, 400, { error: "method-too-long" });
+    }
+    if (!/^[0-9]+$/.test(amount)) {
+      logEvent({ event: "x402.pay", ok: false, error: "invalid-amount", amount, ms: Date.now() - startedAt });
+      return sendJson(res, 400, { error: "invalid-amount" });
+    }
+    if (metadata && JSON.stringify(metadata).length > 16 * 1024) {
+      logEvent({ event: "x402.pay", ok: false, error: "metadata-too-large", ms: Date.now() - startedAt });
+      return sendJson(res, 400, { error: "metadata-too-large" });
+    }
+
+    if (payerAddress) {
+      const payerRate = payerLimiter.consume(String(payerAddress).toLowerCase());
+      if (!payerRate.ok) {
+        logEvent({
+          event: "x402.rateLimit",
+          ok: false,
+          kind: "payer",
+          payerAddress,
+          clientIp,
+          resetMs: payerRate.resetMs,
+          ms: Date.now() - startedAt
+        });
+        res.writeHead(429, { "content-type": "application/json", "retry-after": String(Math.ceil(payerRate.resetMs / 1000)) });
+        return res.end(JSON.stringify({ error: "rate-limited", kind: "payer" }));
+      }
     }
 
     const policy = loadPolicy(policyFile);
