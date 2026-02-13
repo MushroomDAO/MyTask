@@ -42,6 +42,20 @@ function sendJson(res, code, obj) {
   res.end(body);
 }
 
+function sendHtml(res, code, html) {
+  res.writeHead(code, { "content-type": "text/html; charset=utf-8", "content-length": Buffer.byteLength(html) });
+  res.end(html);
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
 function parseUrl(u) {
   try {
     return new URL(u);
@@ -102,6 +116,49 @@ async function main() {
 
   const server = http.createServer(async (req, res) => {
     const startedAt = Date.now();
+    if (req.method === "GET" && req.url === "/") {
+      const accounting = readJson(accountingPath, { days: {} });
+      let receipts = [];
+      try {
+        receipts = fs
+          .readdirSync(receiptsDir)
+          .filter((n) => n.endsWith(".json"))
+          .map((n) => {
+            const p = path.join(receiptsDir, n);
+            return { name: n, mtimeMs: fs.statSync(p).mtimeMs };
+          })
+          .sort((a, b) => b.mtimeMs - a.mtimeMs)
+          .slice(0, 20)
+          .map((r) => r.name.replace(/\.json$/, ""));
+      } catch {}
+
+      const receiptLinks = receipts
+        .map((id) => `<li><a href="/receipts/${escapeHtml(id)}">${escapeHtml(id)}</a></li>`)
+        .join("");
+
+      const html = `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>x402 proxy</title>
+  </head>
+  <body>
+    <h1>x402 proxy</h1>
+    <ul>
+      <li><a href="/health">/health</a></li>
+      <li><a href="/stats">/stats</a></li>
+      <li><a href="/receipts">/receipts</a></li>
+    </ul>
+    <h2>Today</h2>
+    <pre>${escapeHtml(JSON.stringify(accounting.days[todayKey()] ?? {}, null, 2))}</pre>
+    <h2>Latest receipts</h2>
+    <ol>${receiptLinks || "<li>(none)</li>"}</ol>
+  </body>
+</html>`;
+      return sendHtml(res, 200, html);
+    }
+
     if (req.method === "GET" && req.url === "/health") {
       return sendJson(res, 200, { ok: true });
     }
@@ -113,6 +170,22 @@ async function main() {
         receiptCount = fs.readdirSync(receiptsDir).filter((n) => n.endsWith(".json")).length;
       } catch {}
       return sendJson(res, 200, { ok: true, accounting, receiptCount });
+    }
+
+    if (req.method === "GET" && req.url === "/receipts") {
+      let receipts = [];
+      try {
+        receipts = fs
+          .readdirSync(receiptsDir)
+          .filter((n) => n.endsWith(".json"))
+          .map((n) => {
+            const p = path.join(receiptsDir, n);
+            return { receiptId: n.replace(/\.json$/, ""), mtimeMs: fs.statSync(p).mtimeMs };
+          })
+          .sort((a, b) => b.mtimeMs - a.mtimeMs)
+          .slice(0, 100);
+      } catch {}
+      return sendJson(res, 200, { ok: true, receipts });
     }
 
     if (req.method === "GET" && req.url && req.url.startsWith("/receipts/")) {
