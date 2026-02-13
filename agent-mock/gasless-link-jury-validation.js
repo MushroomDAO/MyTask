@@ -254,7 +254,7 @@ async function main() {
             );
 
             if (receiptUri) {
-              const receiptId = keccak256(toHex(`${receiptUri}:${taskId}`));
+              const receiptId = keccak256(toHex(receiptUri));
               const linkReceiptData = encodeFunctionData({
                 abi: taskEscrowAbi,
                 functionName: "linkReceipt",

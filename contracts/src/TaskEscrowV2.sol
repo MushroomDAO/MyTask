@@ -578,6 +578,37 @@ contract TaskEscrowV2 {
         _taskValidationRequests[taskId].push(requestHash);
     }
 
+    function validationsSatisfied(bytes32 taskId) external view returns (bool) {
+        bytes32[] storage requiredTags = _taskRequiredValidationTags[taskId];
+        if (requiredTags.length == 0) return true;
+
+        bytes32[] storage requests = _taskValidationRequests[taskId];
+
+        for (uint256 i = 0; i < requiredTags.length; i++) {
+            bytes32 tag = requiredTags[i];
+            ValidationRequirement storage req = _taskTagValidationRequirements[taskId][tag];
+            if (!req.enabled) continue;
+
+            uint256 total = 0;
+            uint64 count = 0;
+
+            for (uint256 j = 0; j < requests.length; j++) {
+                ( , , uint8 response, bytes32 responseTag, uint256 lastUpdate) =
+                    IJuryContract(juryContract).getValidationStatus(requests[j]);
+                if (lastUpdate == 0) continue;
+                if (responseTag != tag) continue;
+                total += response;
+                count++;
+            }
+
+            if (count < req.minCount) return false;
+            uint8 avg = uint8(total / count);
+            if (avg < req.minAvgResponse) return false;
+        }
+
+        return true;
+    }
+
     // ====================================
     // Internal Functions
     // ====================================
