@@ -33,6 +33,21 @@ function ensureDir(p) {
   fs.mkdirSync(p, { recursive: true });
 }
 
+function atomicWriteFile(filePath, data) {
+  const dir = path.dirname(filePath);
+  const base = path.basename(filePath);
+  const tmpPath = path.join(dir, `.${base}.tmp-${process.pid}-${Date.now()}`);
+  try {
+    fs.writeFileSync(tmpPath, data);
+    fs.renameSync(tmpPath, filePath);
+  } catch (e) {
+    try {
+      if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+    } catch {}
+    throw e;
+  }
+}
+
 function sendJson(res, code, obj) {
   const body = JSON.stringify(obj);
   res.writeHead(code, { "content-type": "application/json", "content-length": Buffer.byteLength(body) });
@@ -431,7 +446,7 @@ async function main() {
   const bytes = toHex(JSON.stringify(state, null, 2));
   const digest = keccak256(bytes);
   const finalState = { digest, ...state };
-  fs.writeFileSync(outFile, JSON.stringify(finalState, null, 2));
+  atomicWriteFile(outFile, JSON.stringify(finalState, null, 2));
 
   const summary = {
     outFile,
