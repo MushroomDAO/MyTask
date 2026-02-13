@@ -260,6 +260,12 @@ contract JuryContract is IJuryContract {
 
         Task storage task = _tasks[taskHash];
         require(task.taskHash != bytes32(0), "Task not found");
+        require(_taskCreators[taskHash] != msg.sender, "Conflict of interest");
+        if (mySBT.code.length > 0) {
+            try IMySBT(mySBT).ownerOf(task.agentId) returns (address owner) {
+                require(owner != msg.sender, "Conflict of interest");
+            } catch {}
+        }
         require(task.status == TaskStatus.IN_PROGRESS, "Task not in progress");
         require(block.timestamp <= task.deadline, "Voting period ended");
         require(response <= 100, "Invalid response score");
@@ -468,6 +474,12 @@ contract JuryContract is IJuryContract {
     ) external {
         Task storage task = _tasks[requestHash];
         require(task.taskHash != bytes32(0), "Task not found");
+        require(_taskCreators[requestHash] != msg.sender, "Conflict of interest");
+        if (mySBT.code.length > 0) {
+            try IMySBT(mySBT).ownerOf(task.agentId) returns (address owner) {
+                require(owner != msg.sender, "Conflict of interest");
+            } catch {}
+        }
 
         bytes32 requiredRole = _tagRoles[tag];
         if (requiredRole != bytes32(0)) {

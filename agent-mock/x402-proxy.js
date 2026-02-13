@@ -83,6 +83,12 @@ function todayKey() {
   return `${yyyy}-${mm}-${dd}`;
 }
 
+function logEvent(obj) {
+  try {
+    process.stdout.write(JSON.stringify({ ts: new Date().toISOString(), ...obj }) + "\n");
+  } catch {}
+}
+
 async function main() {
   const argv = process.argv.slice(2);
   const port = Number(getArgValue(argv, "--port") ?? process.env.X402_PROXY_PORT ?? "8787");
@@ -95,8 +101,18 @@ async function main() {
   const accountingPath = path.join(storeDir, "accounting.json");
 
   const server = http.createServer(async (req, res) => {
+    const startedAt = Date.now();
     if (req.method === "GET" && req.url === "/health") {
       return sendJson(res, 200, { ok: true });
+    }
+
+    if (req.method === "GET" && req.url === "/stats") {
+      const accounting = readJson(accountingPath, { days: {} });
+      let receiptCount = 0;
+      try {
+        receiptCount = fs.readdirSync(receiptsDir).filter((n) => n.endsWith(".json")).length;
+      } catch {}
+      return sendJson(res, 200, { ok: true, accounting, receiptCount });
     }
 
     if (req.method === "GET" && req.url && req.url.startsWith("/receipts/")) {
@@ -117,6 +133,7 @@ async function main() {
     try {
       body = JSON.parse(raw || "{}");
     } catch {
+      logEvent({ event: "x402.pay", ok: false, error: "invalid-json", ms: Date.now() - startedAt });
       return sendJson(res, 400, { error: "invalid-json" });
     }
 
@@ -131,16 +148,26 @@ async function main() {
     const policyId = body.policyId ?? "default";
     const metadata = body.metadata ?? null;
 
-    if (!url) return sendJson(res, 400, { error: "missing-url" });
+    if (!url) {
+      logEvent({ event: "x402.pay", ok: false, error: "missing-url", ms: Date.now() - startedAt });
+      return sendJson(res, 400, { error: "missing-url" });
+    }
 
     const policy = loadPolicy(policyFile);
-    if (policy.policyId && policyId !== policy.policyId) return sendJson(res, 403, { error: "policy-id-mismatch" });
+    if (policy.policyId && policyId !== policy.policyId) {
+      logEvent({ event: "x402.pay", ok: false, error: "policy-id-mismatch", policyId, ms: Date.now() - startedAt });
+      return sendJson(res, 403, { error: "policy-id-mismatch" });
+    }
     if (policy.sponsorAddress && sponsorAddress && String(policy.sponsorAddress).toLowerCase() !== String(sponsorAddress).toLowerCase()) {
+      logEvent({ event: "x402.pay", ok: false, error: "sponsor-mismatch", sponsorAddress, ms: Date.now() - startedAt });
       return sendJson(res, 403, { error: "sponsor-mismatch" });
     }
 
     const allow = allowedByPolicy(policy, url);
-    if (!allow.ok) return sendJson(res, 403, { error: allow.reason });
+    if (!allow.ok) {
+      logEvent({ event: "x402.pay", ok: false, error: allow.reason, url, ms: Date.now() - startedAt });
+      return sendJson(res, 403, { error: allow.reason });
+    }
 
     const accounting = readJson(accountingPath, { days: {} });
     const day = todayKey();
@@ -150,7 +177,10 @@ async function main() {
 
     if (policy.limits.maxAmountPerDay !== null) {
       const max = BigInt(String(policy.limits.maxAmountPerDay));
-      if (dayTotal + amountInt > max) return sendJson(res, 402, { error: "daily-limit-exceeded" });
+      if (dayTotal + amountInt > max) {
+        logEvent({ event: "x402.pay", ok: false, error: "daily-limit-exceeded", amount, day, ms: Date.now() - startedAt });
+        return sendJson(res, 402, { error: "daily-limit-exceeded" });
+      }
     }
 
     accounting.days[day].total = (dayTotal + amountInt).toString();
@@ -165,14 +195,8 @@ async function main() {
     writeJson(accountingPath, accounting);
 
     const createdAt = new Date().toISOString();
-    const receiptUri = `file://${path.join(receiptsDir, "pending")}`;
-    const receiptId = keccak256(toHex(receiptUri));
-    const finalReceiptUri = `file://${path.join(receiptsDir, `${receiptId}.json`)}`;
-
-    const receipt = {
+    const baseReceipt = {
       version: "1",
-      receiptId,
-      receiptUri: finalReceiptUri,
       createdAt,
       payer: { address: payerAddress, agentId },
       sponsor: sponsorAddress ? { address: sponsorAddress, policyId } : undefined,
@@ -181,12 +205,30 @@ async function main() {
       metadata
     };
 
+    const receiptId = keccak256(toHex(JSON.stringify(baseReceipt)));
+    const finalReceiptUri = `file://${path.join(receiptsDir, `${receiptId}.json`)}`;
+    const receipt = { ...baseReceipt, receiptId, receiptUri: finalReceiptUri };
+
     writeJson(path.join(receiptsDir, `${receiptId}.json`), receipt);
+    logEvent({
+      event: "x402.pay",
+      ok: true,
+      receiptId,
+      receiptUri: finalReceiptUri,
+      amount,
+      currency,
+      payerAddress,
+      sponsorAddress,
+      policyId,
+      url,
+      method,
+      ms: Date.now() - startedAt
+    });
     return sendJson(res, 200, { receiptId, receiptUri: finalReceiptUri });
   });
 
   server.listen(port, () => {
-    process.stdout.write(JSON.stringify({ ok: true, port, storeDir, policyFile }) + "\n");
+    logEvent({ event: "x402.start", ok: true, port, storeDir, policyFile });
   });
 }
 
@@ -194,4 +236,3 @@ main().catch((err) => {
   console.error(err);
   process.exit(1);
 });
-

@@ -88,6 +88,14 @@ flowchart TB
 - **Items+Actions reward with traceability**: MyShop `RewardAction` emits `RewardIssued(taskId, juryTaskHash, recipient, ...)`
 - **Event-driven gasless agent mock**: aastar-sdk example watches on-chain events and submits gasless userOps (PaymasterClient)
 
+## New Features (2026-02-13)
+
+- **ERC-8004 canonical JSON schemas**: `docs/schemas/erc8004-validation-*.schema.json`
+- **x402 receipt schema**: `docs/schemas/x402-receipt.schema.json`
+- **Local x402 proxy + sponsor policy + receipt storage**: `agent-mock/x402-proxy.js` + `agent-mock/sponsor-policy.json`
+- **Validation + receipts indexer (events → JSON state)**: `agent-mock/indexer.js`
+- **Task orchestrator demo**: `agent-mock/gasless-link-jury-validation.js --mode orchestrateTasks`
+
 ## Agent Interaction Flow
 
 ```mermaid
@@ -156,6 +164,57 @@ forge test
 forge script script/Deploy.s.sol --rpc-url localhost:8545
 ```
 
+## Run Local Demo (x402 receipts + validations + orchestration)
+
+```bash
+# 1) Start local chain (in a separate terminal)
+anvil -p 8545
+
+# 2) Deploy contracts (captures TaskEscrow + Jury addresses in broadcast output)
+cd contracts
+forge script script/Deploy.s.sol --rpc-url http://localhost:8545 --broadcast
+
+# 3) Install agent-mock deps
+cd ../agent-mock
+npm install
+
+# 4) Start local x402 proxy (writes receipts under agent-mock/receipts/)
+npm run x402:proxy
+```
+
+Create `.env` at the repo root (required by agent-mock):
+
+```bash
+RPC_URL=http://localhost:8545
+CHAIN_ID=31337
+TASK_ESCROW_ADDRESS=0x...
+JURY_CONTRACT_ADDRESS=0x...
+PRIVATE_KEY=0x...
+COMMUNITY_PRIVATE_KEY=0x...            # optional (defaults to PRIVATE_KEY)
+VALIDATOR_PRIVATE_KEY=0x...            # optional (defaults to PRIVATE_KEY)
+X402_PROXY_URL=http://localhost:8787   # optional (enables auto receipt generation)
+```
+
+Run the orchestrator (watches `TaskCreated` and drives accept → submit → receipts → validations → finalize):
+
+```bash
+cd agent-mock
+npm run orchestrateTasks -- \
+  --once true \
+  --agentId 1 \
+  --validationMinCount 1 \
+  --validationTag QUALITY \
+  --x402TaskAmount 1 \
+  --x402ValidationAmount 1
+```
+
+Index events into a compact JSON snapshot (tasks + receipts + validations + per-agent aggregates):
+
+```bash
+cd agent-mock
+npm run index -- --out out/index.json
+```
+
 ## Documentation
 
 | Document | Description |
@@ -198,6 +257,14 @@ MIT License - Open source and permissionless.
 - **Escrow 结算语义修复（无余额残留）**：supplier 已设置但 supplierFee 未打满上限时，未用完 supplierShare 自动再分配（TaskEscrow + TaskEscrowV2）
 - **Items+Actions 奖励强绑定**：MyShop `RewardAction` 事件 `RewardIssued(taskId, juryTaskHash, recipient, ...)`
 - **事件驱动的 Gasless Agent Mock**：aastar-sdk 示例订阅事件并提交 gasless userOp（PaymasterClient）
+
+## 新增特性（2026-02-13）
+
+- **ERC-8004 验证请求/响应 JSON Schema**：`docs/schemas/erc8004-validation-*.schema.json`
+- **x402 回执 JSON Schema**：`docs/schemas/x402-receipt.schema.json`
+- **本地 x402 Proxy + 赞助策略 + 回执存储**：`agent-mock/x402-proxy.js` + `agent-mock/sponsor-policy.json`
+- **验证与回执索引器（events → JSON state）**：`agent-mock/indexer.js`
+- **任务编排 Demo（orchestrator）**：`agent-mock/gasless-link-jury-validation.js --mode orchestrateTasks`
 
 ## 架构概览
 

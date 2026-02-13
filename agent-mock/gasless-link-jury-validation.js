@@ -107,6 +107,7 @@ async function main() {
     const autoSubmit = parseBool(getArgValue(argv, "--autoSubmit"), true);
     const autoFinalize = parseBool(getArgValue(argv, "--autoFinalize"), true);
     const autoFastForward = parseBool(getArgValue(argv, "--autoFastForward"), true);
+    const requireManualFinalize = parseBool(getArgValue(argv, "--requireManualFinalize"), false);
     const evidenceUri =
       getArgValue(argv, "--evidenceUri") ??
       process.env.EVIDENCE_URI ??
@@ -289,6 +290,13 @@ async function main() {
         stateMutability: "nonpayable",
         inputs: [{ name: "taskId", type: "bytes32" }],
         outputs: []
+      },
+      {
+        type: "function",
+        name: "validationsSatisfied",
+        stateMutability: "view",
+        inputs: [{ name: "taskId", type: "bytes32" }],
+        outputs: [{ type: "bool" }]
       }
     ];
 
@@ -567,6 +575,32 @@ async function main() {
                 } catch (e) {
                   process.stdout.write(JSON.stringify({ mode, action: "fastForwardFailed", error: String(e) }) + "\n");
                 }
+              }
+
+              if (requireManualFinalize) {
+                let satisfied = null;
+                try {
+                  satisfied = await publicClient.readContract({
+                    address: taskEscrow,
+                    abi: taskEscrowAbi,
+                    functionName: "validationsSatisfied",
+                    args: [taskId]
+                  });
+                } catch {}
+                process.stdout.write(
+                  JSON.stringify({
+                    mode,
+                    action: "manualFinalizeRequired",
+                    taskId,
+                    challengeDeadline: refreshed.challengeDeadline,
+                    validationsSatisfied: satisfied
+                  }) + "\n"
+                );
+                if (once) {
+                  unwatch();
+                  process.exit(0);
+                }
+                continue;
               }
 
               const finalizeData = encodeFunctionData({

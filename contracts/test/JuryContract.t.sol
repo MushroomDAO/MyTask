@@ -275,6 +275,83 @@ contract JuryContractTest is Test {
         assertEq(lastUpdate, block.timestamp);
     }
 
+    function test_ValidationResponseRejectsRequester() public {
+        bytes32 requestHash = keccak256("request-self-validate");
+        vm.prank(taskCreator);
+        jury.validationRequest(address(jury), AGENT_ID, "ipfs://request", requestHash);
+
+        vm.prank(taskCreator);
+        vm.expectRevert("Conflict of interest");
+        jury.validationResponse(requestHash, 80, "ipfs://resp", bytes32(0), bytes32("TAG"));
+    }
+
+    function test_ValidationResponseRejectsAgentOwner() public {
+        uint256 agentId = 2;
+        sbt.mint(juror1, agentId);
+
+        bytes32 requestHash = keccak256("request-agent-owner");
+        vm.prank(taskCreator);
+        jury.validationRequest(address(jury), agentId, "ipfs://request", requestHash);
+
+        vm.prank(juror1);
+        vm.expectRevert("Conflict of interest");
+        jury.validationResponse(requestHash, 80, "ipfs://resp", bytes32(0), bytes32("TAG"));
+    }
+
+    function test_VoteRejectsTaskCreator() public {
+        stakingToken.mint(taskCreator, 1000 ether);
+        vm.prank(taskCreator);
+        stakingToken.approve(address(jury), type(uint256).max);
+        vm.prank(taskCreator);
+        jury.registerJuror(MIN_STAKE);
+
+        IJuryContract.TaskParams memory params = IJuryContract.TaskParams({
+            agentId: AGENT_ID,
+            taskType: IJuryContract.TaskType.SIMPLE_VERIFICATION,
+            evidenceUri: "ipfs://QmEvidence",
+            reward: 0,
+            deadline: block.timestamp + 7 days,
+            minJurors: 1,
+            consensusThreshold: 5000
+        });
+
+        vm.prank(taskCreator);
+        bytes32 taskHash = jury.createTask(params);
+        vm.prank(taskCreator);
+        jury.submitEvidence(taskHash, "ipfs://QmEvidence");
+
+        vm.prank(taskCreator);
+        vm.expectRevert("Conflict of interest");
+        jury.vote(taskHash, 85, "");
+    }
+
+    function test_VoteRejectsAgentOwner() public {
+        uint256 agentId = 2;
+        sbt.mint(juror1, agentId);
+
+        vm.prank(juror1);
+        jury.registerJuror(MIN_STAKE);
+
+        IJuryContract.TaskParams memory params = IJuryContract.TaskParams({
+            agentId: agentId,
+            taskType: IJuryContract.TaskType.SIMPLE_VERIFICATION,
+            evidenceUri: "ipfs://QmEvidence",
+            reward: 0,
+            deadline: block.timestamp + 7 days,
+            minJurors: 1,
+            consensusThreshold: 5000
+        });
+
+        vm.prank(taskCreator);
+        bytes32 taskHash = jury.createTask(params);
+        vm.prank(taskCreator);
+        jury.submitEvidence(taskHash, "ipfs://QmEvidence");
+
+        vm.prank(juror1);
+        vm.expectRevert("Conflict of interest");
+        jury.vote(taskHash, 85, "");
+    }
+
     function test_GetAgentValidations() public {
         // Create multiple tasks for same agent
         IJuryContract.TaskParams memory params = IJuryContract.TaskParams({
