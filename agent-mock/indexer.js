@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const nodeHttp = require("http");
 const fs = require("fs");
 const path = require("path");
 const { createPublicClient, http, decodeEventLog, keccak256, toHex } = require("viem");
@@ -16,6 +17,13 @@ function getArgValue(argv, key) {
   return argv[i + 1];
 }
 
+function parseBool(v, defaultValue) {
+  if (v === undefined) return defaultValue;
+  if (v === "true") return true;
+  if (v === "false") return false;
+  throw new Error(`Invalid boolean: ${v}`);
+}
+
 function normalizeHexAddress(v) {
   if (!v) return v;
   return v.startsWith("0x") ? v : `0x${v}`;
@@ -23,6 +31,26 @@ function normalizeHexAddress(v) {
 
 function ensureDir(p) {
   fs.mkdirSync(p, { recursive: true });
+}
+
+function sendJson(res, code, obj) {
+  const body = JSON.stringify(obj);
+  res.writeHead(code, { "content-type": "application/json", "content-length": Buffer.byteLength(body) });
+  res.end(body);
+}
+
+function sendHtml(res, code, html) {
+  res.writeHead(code, { "content-type": "text/html; charset=utf-8", "content-length": Buffer.byteLength(html) });
+  res.end(html);
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 function toNumberSafe(v) {
@@ -34,6 +62,8 @@ async function main() {
   const argv = process.argv.slice(2);
   const rpcUrl = getArgValue(argv, "--rpcUrl") ?? process.env.RPC_URL ?? requireEnv("RPC_URL");
   const chainId = Number(getArgValue(argv, "--chainId") ?? process.env.CHAIN_ID ?? "1");
+  const serve = parseBool(getArgValue(argv, "--serve") ?? process.env.INDEXER_SERVE, false);
+  const port = Number(getArgValue(argv, "--port") ?? process.env.INDEXER_PORT ?? "8790");
   const taskEscrow = normalizeHexAddress(
     getArgValue(argv, "--taskEscrow") ?? process.env.TASK_ESCROW_ADDRESS ?? requireEnv("TASK_ESCROW_ADDRESS")
   );
@@ -400,8 +430,140 @@ async function main() {
 
   const bytes = toHex(JSON.stringify(state, null, 2));
   const digest = keccak256(bytes);
-  fs.writeFileSync(outFile, JSON.stringify({ digest, ...state }, null, 2));
-  process.stdout.write(JSON.stringify({ outFile, digest, tasks: Object.keys(state.tasks).length, agents: Object.keys(state.agents).length }) + "\n");
+  const finalState = { digest, ...state };
+  fs.writeFileSync(outFile, JSON.stringify(finalState, null, 2));
+
+  const summary = {
+    outFile,
+    digest,
+    tasks: Object.keys(state.tasks).length,
+    validations: Object.keys(state.validations).length,
+    agents: Object.keys(state.agents).length,
+    alerts: state.alerts.length
+  };
+  process.stdout.write(JSON.stringify(summary) + "\n");
+
+  if (!serve) return;
+
+  const flattenValidations = () => {
+    const all = [];
+    for (const taskId of Object.keys(finalState.tasks)) {
+      const t = finalState.tasks[taskId];
+      const vals = t.validations ?? [];
+      for (const v of vals) {
+        all.push({ taskId, ...v });
+      }
+    }
+    all.sort((a, b) => Number(BigInt(b.lastUpdate ?? "0") - BigInt(a.lastUpdate ?? "0")));
+    return all;
+  };
+
+  const listTasks = () => {
+    const arr = Object.keys(finalState.tasks).map((taskId) => {
+      const t = finalState.tasks[taskId] ?? {};
+      const onchain = t.onchain ?? {};
+      return {
+        taskId,
+        status: onchain.status ?? null,
+        community: onchain.community ?? null,
+        taskor: onchain.taskor ?? null,
+        supplier: onchain.supplier ?? null,
+        reward: onchain.reward ?? null,
+        createdAt: onchain.createdAt ?? null,
+        deadline: onchain.deadline ?? null,
+        challengeDeadline: onchain.challengeDeadline ?? null,
+        validationsSatisfied: onchain.validationsSatisfied ?? null,
+        metadataUri: onchain.metadataUri ?? null,
+        evidenceUri: onchain.evidenceUri ?? null
+      };
+    });
+    arr.sort((a, b) => Number(BigInt(b.createdAt ?? "0") - BigInt(a.createdAt ?? "0")));
+    return arr;
+  };
+
+  const server = nodeHttp.createServer((req, res) => {
+    const u = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+    const p = u.pathname;
+
+    if (req.method === "GET" && p === "/health") {
+      return sendJson(res, 200, { ok: true });
+    }
+
+    if (req.method === "GET" && p === "/state") {
+      return sendJson(res, 200, finalState);
+    }
+
+    if (req.method === "GET" && p === "/alerts") {
+      return sendJson(res, 200, { ok: true, alerts: finalState.alerts });
+    }
+
+    if (req.method === "GET" && p === "/tasks") {
+      return sendJson(res, 200, { ok: true, tasks: listTasks() });
+    }
+
+    if (req.method === "GET" && p.startsWith("/tasks/")) {
+      const taskId = p.split("/").pop();
+      const task = finalState.tasks[taskId];
+      if (!task) return sendJson(res, 404, { error: "not-found" });
+      return sendJson(res, 200, { ok: true, task });
+    }
+
+    if (req.method === "GET" && p === "/validations") {
+      return sendJson(res, 200, { ok: true, validations: flattenValidations() });
+    }
+
+    if (req.method === "GET" && p.startsWith("/agents/")) {
+      const agentId = p.split("/").pop();
+      const agent = finalState.agents[agentId];
+      if (!agent) return sendJson(res, 404, { error: "not-found" });
+      return sendJson(res, 200, { ok: true, agent });
+    }
+
+    if (req.method === "GET" && p === "/agents") {
+      const agents = Object.keys(finalState.agents)
+        .map((agentId) => ({ agentId, ...finalState.agents[agentId] }))
+        .sort((a, b) => Number(BigInt(b.agentId) - BigInt(a.agentId)));
+      return sendJson(res, 200, { ok: true, agents });
+    }
+
+    if (req.method === "GET" && p === "/") {
+      const tasks = listTasks().slice(0, 20);
+      const taskLinks = tasks
+        .map((t) => `<li><a href="/tasks/${escapeHtml(t.taskId)}">${escapeHtml(t.taskId)}</a> status=${escapeHtml(t.status)}</li>`)
+        .join("");
+
+      const html = `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MyTask indexer</title>
+  </head>
+  <body>
+    <h1>MyTask indexer</h1>
+    <ul>
+      <li><a href="/health">/health</a></li>
+      <li><a href="/tasks">/tasks</a></li>
+      <li><a href="/validations">/validations</a></li>
+      <li><a href="/agents">/agents</a></li>
+      <li><a href="/alerts">/alerts</a></li>
+      <li><a href="/state">/state</a></li>
+    </ul>
+    <h2>Summary</h2>
+    <pre>${escapeHtml(JSON.stringify(summary, null, 2))}</pre>
+    <h2>Latest tasks</h2>
+    <ol>${taskLinks || "<li>(none)</li>"}</ol>
+  </body>
+</html>`;
+      return sendHtml(res, 200, html);
+    }
+
+    return sendJson(res, 404, { error: "not-found" });
+  });
+
+  server.listen(port, () => {
+    process.stdout.write(JSON.stringify({ ok: true, serve: true, port }) + "\n");
+  });
 }
 
 main().catch((err) => {
