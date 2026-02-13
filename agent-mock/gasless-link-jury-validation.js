@@ -5,7 +5,9 @@ const {
   http,
   encodeFunctionData,
   concat,
-  pad
+  pad,
+  keccak256,
+  toHex
 } = require("viem");
 const { privateKeyToAccount } = require("viem/accounts");
 const path = require("path");
@@ -251,6 +253,10 @@ async function main() {
     return;
   }
 
+  if (mode !== "linkJuryValidation" && mode !== "linkReceipt") {
+    throw new Error(`Unsupported mode: ${mode}`);
+  }
+
   const bundlerUrl = getArgValue(argv, "--bundlerUrl") ?? requireEnv("BUNDLER_URL");
   const privateKeyRaw = getArgValue(argv, "--privateKey") ?? requireEnv("PRIVATE_KEY");
   const privateKey = privateKeyRaw.startsWith("0x") ? privateKeyRaw : `0x${privateKeyRaw}`;
@@ -259,7 +265,19 @@ async function main() {
   const aaAccount = getArgValue(argv, "--aaAccount") ?? requireEnv("AA_ACCOUNT_ADDRESS");
 
   const taskId = getArgValue(argv, "--taskId") ?? requireEnv("TASK_ID");
-  const juryTaskHash = getArgValue(argv, "--juryTaskHash") ?? requireEnv("JURY_TASK_HASH");
+  const juryTaskHash =
+    mode === "linkJuryValidation" ? getArgValue(argv, "--juryTaskHash") ?? requireEnv("JURY_TASK_HASH") : undefined;
+  const receiptUri =
+    mode === "linkReceipt" ? getArgValue(argv, "--receiptUri") ?? requireEnv("RECEIPT_URI") : undefined;
+  const receiptIdRaw = mode === "linkReceipt" ? getArgValue(argv, "--receiptId") ?? process.env.RECEIPT_ID : undefined;
+  const receiptId =
+    mode === "linkReceipt"
+      ? receiptIdRaw
+        ? receiptIdRaw.startsWith("0x")
+          ? receiptIdRaw
+          : `0x${receiptIdRaw}`
+        : keccak256(toHex(receiptUri))
+      : undefined;
 
   const paymasterVerificationGas = BigInt(getArgValue(argv, "--paymasterVerificationGas") ?? process.env.PAYMASTER_VERIFICATION_GAS ?? "200000");
   const paymasterPostOpGas = BigInt(getArgValue(argv, "--paymasterPostOpGas") ?? process.env.PAYMASTER_POSTOP_GAS ?? "50000");
@@ -279,7 +297,14 @@ async function main() {
   ];
 
   const taskEscrowAbi = [
-    { type: "function", name: "linkJuryValidation", stateMutability: "nonpayable", inputs: [{ type: "bytes32" }, { type: "bytes32" }], outputs: [] }
+    { type: "function", name: "linkJuryValidation", stateMutability: "nonpayable", inputs: [{ type: "bytes32" }, { type: "bytes32" }], outputs: [] },
+    {
+      type: "function",
+      name: "linkReceipt",
+      stateMutability: "nonpayable",
+      inputs: [{ type: "bytes32" }, { type: "bytes32" }, { type: "string" }],
+      outputs: []
+    }
   ];
 
   const entryPointAbi = [
@@ -309,11 +334,18 @@ async function main() {
 
   const nonce = await publicClient.readContract({ address: aaAccount, abi: aaAbi, functionName: "getNonce" });
 
-  const linkData = encodeFunctionData({
-    abi: taskEscrowAbi,
-    functionName: "linkJuryValidation",
-    args: [taskId, juryTaskHash]
-  });
+  const linkData =
+    mode === "linkJuryValidation"
+      ? encodeFunctionData({
+          abi: taskEscrowAbi,
+          functionName: "linkJuryValidation",
+          args: [taskId, juryTaskHash]
+        })
+      : encodeFunctionData({
+          abi: taskEscrowAbi,
+          functionName: "linkReceipt",
+          args: [taskId, receiptId, receiptUri]
+        });
 
   const callData = encodeFunctionData({
     abi: aaAbi,
