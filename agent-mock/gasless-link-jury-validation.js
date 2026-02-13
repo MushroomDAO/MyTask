@@ -6,10 +6,12 @@ const {
   encodeFunctionData,
   concat,
   pad,
+  decodeEventLog,
   keccak256,
   toHex
 } = require("viem");
 const { privateKeyToAccount } = require("viem/accounts");
+const fs = require("fs");
 const path = require("path");
 require("dotenv").config({ path: path.join(process.cwd(), ".env") });
 
@@ -17,6 +19,44 @@ function requireEnv(name) {
   const v = process.env[name];
   if (!v) throw new Error(`Missing env: ${name}`);
   return v;
+}
+
+function ensureDir(p) {
+  fs.mkdirSync(p, { recursive: true });
+}
+
+function atomicWriteFile(filePath, data) {
+  const dir = path.dirname(filePath);
+  const base = path.basename(filePath);
+  const tmpPath = path.join(dir, `.${base}.tmp-${process.pid}-${Date.now()}`);
+  try {
+    fs.writeFileSync(tmpPath, data);
+    fs.renameSync(tmpPath, filePath);
+  } catch (e) {
+    try {
+      if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+    } catch {}
+    throw e;
+  }
+}
+
+function writeJsonAtomic(filePath, obj) {
+  atomicWriteFile(filePath, JSON.stringify(obj, null, 2));
+}
+
+function readJsonRecovering(filePath, fallback) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    try {
+      if (fs.existsSync(filePath)) {
+        const recoveredPath = `${filePath}.corrupt-${Date.now()}`;
+        fs.renameSync(filePath, recoveredPath);
+        logEvent({ event: "orchestrator.recover", ok: true, filePath, recoveredPath });
+      }
+    } catch {}
+    return fallback;
+  }
 }
 
 function getArgValue(argv, key) {
@@ -36,6 +76,22 @@ function logEvent(obj) {
   try {
     process.stdout.write(JSON.stringify({ ts: new Date().toISOString(), ...obj }) + "\n");
   } catch {}
+}
+
+async function withRetries(fn, { retries, baseDelayMs, label }) {
+  const n = retries ?? 2;
+  const base = baseDelayMs ?? 250;
+  for (let attempt = 0; attempt <= n; attempt++) {
+    try {
+      return await fn(attempt);
+    } catch (e) {
+      if (attempt >= n) throw e;
+      const delay = base * 2 ** attempt;
+      logEvent({ event: "retry", ok: false, label, attempt: attempt + 1, delayMs: delay, error: String(e) });
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  return null;
 }
 
 async function bundlerRpc(url, method, params) {
@@ -114,6 +170,15 @@ async function main() {
     const autoFinalize = parseBool(getArgValue(argv, "--autoFinalize"), true);
     const autoFastForward = parseBool(getArgValue(argv, "--autoFastForward"), true);
     const requireManualFinalize = parseBool(getArgValue(argv, "--requireManualFinalize"), false);
+    const scanOnStart = parseBool(getArgValue(argv, "--scanOnStart") ?? process.env.ORCH_SCAN_ON_START, true);
+    const lookbackBlocks = BigInt(getArgValue(argv, "--lookbackBlocks") ?? process.env.ORCH_LOOKBACK_BLOCKS ?? "5000");
+    const stateFile =
+      getArgValue(argv, "--stateFile") ??
+      process.env.ORCH_STATE_FILE ??
+      path.join(process.cwd(), "out", "orchestrator-state.json");
+    ensureDir(path.dirname(stateFile));
+    const state = readJsonRecovering(stateFile, { version: 1, tasks: {}, lastScanToBlock: "0" });
+    if (!state.tasks || typeof state.tasks !== "object") state.tasks = {};
     const evidenceUri =
       getArgValue(argv, "--evidenceUri") ??
       process.env.EVIDENCE_URI ??
@@ -312,9 +377,14 @@ async function main() {
         logEvent({ event: "orchestrator.dryRunTx", mode, to, from, data });
         return null;
       }
-      const hash = await wallet.sendTransaction({ to, data, value: 0n });
-      await publicClient.waitForTransactionReceipt({ hash });
-      return hash;
+      return await withRetries(
+        async () => {
+          const hash = await wallet.sendTransaction({ to, data, value: 0n });
+          await publicClient.waitForTransactionReceipt({ hash });
+          return hash;
+        },
+        { retries: 2, baseDelayMs: 300, label: "sendTx" }
+      );
     };
 
     const rpcRequest = async (method, params) => {
@@ -323,26 +393,353 @@ async function main() {
 
     const x402Pay = async ({ url, method, amount, payerAddress }) => {
       if (!x402ProxyUrl) return null;
-      const res = await fetch(`${x402ProxyUrl.replace(/\/$/, "")}/pay`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          url,
-          method,
-          amount,
-          currency: x402Currency,
-          payerAddress,
-          agentId: agentId.toString(),
-          chainId: String(chainId),
-          sponsorAddress: x402SponsorAddress,
-          policyId: x402PolicyId,
-          metadata: { mode: "orchestrateTasks" }
-        })
-      });
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(`x402 /pay ${res.status}: ${JSON.stringify(json)}`);
-      return json.receiptUri;
+      return await withRetries(
+        async () => {
+          const res = await fetch(`${x402ProxyUrl.replace(/\/$/, "")}/pay`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              url,
+              method,
+              amount,
+              currency: x402Currency,
+              payerAddress,
+              agentId: agentId.toString(),
+              chainId: String(chainId),
+              sponsorAddress: x402SponsorAddress,
+              policyId: x402PolicyId,
+              metadata: { mode: "orchestrateTasks" }
+            })
+          });
+          const json = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(`x402 /pay ${res.status}: ${JSON.stringify(json)}`);
+          return json.receiptUri;
+        },
+        { retries: 2, baseDelayMs: 400, label: "x402Pay" }
+      );
     };
+
+    const saveState = () => {
+      try {
+        writeJsonAtomic(stateFile, state);
+      } catch (e) {
+        logEvent({ event: "orchestrator.stateWriteFailed", ok: false, stateFile, error: String(e) });
+      }
+    };
+
+    const taskCreatedEvent = taskEscrowAbi.find((x) => x?.type === "event" && x?.name === "TaskCreated");
+    const taskCreatedTopic0 = keccak256(toHex("TaskCreated(bytes32,address,address,uint256)"));
+    const ingestTaskCreated = (log) => {
+      if (!taskCreatedEvent) return null;
+      try {
+        const decoded = decodeEventLog({ abi: [taskCreatedEvent], data: log.data, topics: log.topics });
+        return decoded?.eventName === "TaskCreated" ? decoded.args : null;
+      } catch {
+        return null;
+      }
+    };
+
+    const processTask = async ({ taskId, source, blockNumber }) => {
+      if (!taskId) return;
+      const taskIdKey = String(taskId);
+      state.tasks[taskIdKey] = state.tasks[taskIdKey] ?? { taskId: taskIdKey, attempts: 0, done: false, lastError: null };
+
+      const entry = state.tasks[taskIdKey];
+      if (entry.done) return;
+
+      entry.attempts = Number(entry.attempts ?? 0) + 1;
+      entry.lastAttemptAt = new Date().toISOString();
+      entry.lastSource = source;
+      if (blockNumber !== undefined && blockNumber !== null) entry.lastBlockNumber = blockNumber.toString();
+      saveState();
+
+      try {
+        const task = await publicClient.readContract({
+          address: taskEscrow,
+          abi: taskEscrowAbi,
+          functionName: "getTask",
+          args: [taskId]
+        });
+
+        const status = Number(task.status);
+        if (status >= 5) {
+          entry.done = true;
+          entry.lastError = null;
+          saveState();
+          logEvent({ event: "orchestrator.skipDoneTask", mode, taskId, status, source });
+          return;
+        }
+
+        const shouldAccept = autoAccept && status === 0;
+        const shouldSubmit =
+          autoSubmit &&
+          (status === 1 || status === 2) &&
+          String(task.taskor).toLowerCase() === account.address.toLowerCase();
+
+        if (shouldAccept) {
+          const data = encodeFunctionData({ abi: taskEscrowAbi, functionName: "acceptTask", args: [taskId] });
+          const txHash = await sendTx({ to: taskEscrow, data, wallet: walletClient });
+          logEvent({ event: "orchestrator.acceptTask", mode, taskId, txHash, source });
+        }
+
+        if (shouldSubmit) {
+          const data = encodeFunctionData({ abi: taskEscrowAbi, functionName: "submitWork", args: [taskId, evidenceUri] });
+          const txHash = await sendTx({ to: taskEscrow, data, wallet: walletClient });
+          logEvent({ event: "orchestrator.submitWork", mode, taskId, evidenceUri, txHash, source });
+
+          if (!receiptUri && x402ProxyUrl && BigInt(x402TaskAmount) > 0n) {
+            try {
+              receiptUri = await x402Pay({ url: evidenceUri, method: "EVIDENCE", amount: x402TaskAmount, payerAddress: account.address });
+              logEvent({ event: "orchestrator.x402Pay", mode, kind: "task", receiptUri });
+            } catch (e) {
+              logEvent({ event: "orchestrator.x402PayFailed", mode, kind: "task", error: String(e) });
+            }
+          }
+
+          if (receiptUri) {
+            const receiptId = keccak256(toHex(receiptUri));
+            const linkReceiptData = encodeFunctionData({ abi: taskEscrowAbi, functionName: "linkReceipt", args: [taskId, receiptId, receiptUri] });
+            const linkReceiptTxHash = await sendTx({ to: taskEscrow, data: linkReceiptData, wallet: walletClient });
+            logEvent({ event: "orchestrator.linkReceipt", mode, taskId, receiptId, receiptUri, txHash: linkReceiptTxHash });
+          }
+
+          if (validationMinCount > 0n && String(task.community).toLowerCase() === communityAccount.address.toLowerCase()) {
+            const setReqData = encodeFunctionData({
+              abi: taskEscrowAbi,
+              functionName: "setTaskValidationRequirementWithValidators",
+              args: [taskId, validationTag, validationMinCount, validationMinAvg, validationMinUnique]
+            });
+            const setReqTxHash = await sendTx({ to: taskEscrow, data: setReqData, wallet: communityWalletClient });
+            logEvent({
+              event: "orchestrator.setTaskValidationRequirementWithValidators",
+              mode,
+              taskId,
+              tag: validationTag,
+              minCount: validationMinCount.toString(),
+              minAvg: validationMinAvg,
+              minUnique: validationMinUnique,
+              txHash: setReqTxHash
+            });
+          }
+
+          const juryAbi = [
+            {
+              type: "function",
+              name: "validationRequest",
+              stateMutability: "nonpayable",
+              inputs: [
+                { name: "validatorAddress", type: "address" },
+                { name: "agentId", type: "uint256" },
+                { name: "requestUri", type: "string" },
+                { name: "requestHash", type: "bytes32" }
+              ],
+              outputs: []
+            },
+            {
+              type: "function",
+              name: "validationResponse",
+              stateMutability: "nonpayable",
+              inputs: [
+                { name: "requestHash", type: "bytes32" },
+                { name: "response", type: "uint8" },
+                { name: "responseUri", type: "string" },
+                { name: "responseHash", type: "bytes32" },
+                { name: "tag", type: "bytes32" }
+              ],
+              outputs: []
+            },
+            {
+              type: "function",
+              name: "linkReceiptToValidation",
+              stateMutability: "nonpayable",
+              inputs: [
+                { name: "requestHash", type: "bytes32" },
+                { name: "receiptId", type: "bytes32" },
+                { name: "receiptUri", type: "string" }
+              ],
+              outputs: []
+            },
+            {
+              type: "function",
+              name: "getValidationStatus",
+              stateMutability: "view",
+              inputs: [{ name: "requestHash", type: "bytes32" }],
+              outputs: [
+                { name: "validatorAddress", type: "address" },
+                { name: "agentId", type: "uint256" },
+                { name: "response", type: "uint8" },
+                { name: "tag", type: "bytes32" },
+                { name: "lastUpdate", type: "uint256" }
+              ]
+            },
+            {
+              type: "function",
+              name: "isActiveJuror",
+              stateMutability: "view",
+              inputs: [{ name: "juror", type: "address" }],
+              outputs: [{ name: "isActive", type: "bool" }, { name: "stake", type: "uint256" }]
+            }
+          ];
+
+          const requestHash =
+            getArgValue(argv, "--requestHash") ??
+            process.env.VALIDATION_REQUEST_HASH ??
+            keccak256(toHex(`${taskId}:${validationTag}:${validationRequestUri}`));
+
+          entry.requestHash = entry.requestHash ?? requestHash;
+          saveState();
+
+          if (validationMinCount > 0n) {
+            const statusTuple = await publicClient.readContract({
+              address: juryContractAddress,
+              abi: juryAbi,
+              functionName: "getValidationStatus",
+              args: [requestHash]
+            });
+            const lastUpdate = BigInt(statusTuple?.[4] ?? 0);
+
+            if (entry.validationRequestSent !== true) {
+              const reqData = encodeFunctionData({ abi: juryAbi, functionName: "validationRequest", args: [juryContractAddress, agentId, validationRequestUri, requestHash] });
+              try {
+                const reqTxHash = await sendTx({ to: juryContractAddress, data: reqData, wallet: communityWalletClient });
+                entry.validationRequestSent = true;
+                saveState();
+                logEvent({ event: "orchestrator.validationRequest", mode, requestHash, requestUri: validationRequestUri, txHash: reqTxHash });
+              } catch (e) {
+                logEvent({ event: "orchestrator.validationRequestFailed", mode, requestHash, error: String(e) });
+              }
+            }
+
+            const addReqData = encodeFunctionData({ abi: taskEscrowAbi, functionName: "addTaskValidationRequest", args: [taskId, requestHash] });
+            try {
+              const addReqTxHash = await sendTx({ to: taskEscrow, data: addReqData, wallet: walletClient });
+              logEvent({ event: "orchestrator.addTaskValidationRequest", mode, taskId, requestHash, txHash: addReqTxHash });
+            } catch (e) {
+              logEvent({ event: "orchestrator.addTaskValidationRequestFailed", mode, taskId, requestHash, error: String(e) });
+            }
+
+            if (!validationReceiptUri && x402ProxyUrl && BigInt(x402ValidationAmount) > 0n) {
+              try {
+                validationReceiptUri = await x402Pay({ url: validationRequestUri, method: "VALIDATION", amount: x402ValidationAmount, payerAddress: communityAccount.address });
+                logEvent({ event: "orchestrator.x402Pay", mode, kind: "validation", receiptUri: validationReceiptUri });
+              } catch (e) {
+                logEvent({ event: "orchestrator.x402PayFailed", mode, kind: "validation", error: String(e) });
+              }
+            }
+
+            if (validationReceiptUri) {
+              const validationReceiptId = keccak256(toHex(validationReceiptUri));
+              const linkValidationReceiptData = encodeFunctionData({
+                abi: juryAbi,
+                functionName: "linkReceiptToValidation",
+                args: [requestHash, validationReceiptId, validationReceiptUri]
+              });
+              try {
+                const linkValidationReceiptTxHash = await sendTx({ to: juryContractAddress, data: linkValidationReceiptData, wallet: communityWalletClient });
+                logEvent({ event: "orchestrator.linkReceiptToValidation", mode, requestHash, receiptId: validationReceiptId, receiptUri: validationReceiptUri, txHash: linkValidationReceiptTxHash });
+              } catch (e) {
+                logEvent({ event: "orchestrator.linkReceiptToValidationFailed", mode, requestHash, error: String(e) });
+              }
+            }
+
+            if (lastUpdate === 0n) {
+              const jurorStatus = await publicClient.readContract({
+                address: juryContractAddress,
+                abi: juryAbi,
+                functionName: "isActiveJuror",
+                args: [validatorAccount.address]
+              });
+              const isActive = Boolean(jurorStatus?.[0]);
+              if (!isActive) {
+                logEvent({ event: "orchestrator.validatorNotActiveJuror", mode, validator: validatorAccount.address, requestHash });
+              } else {
+                const respData = encodeFunctionData({
+                  abi: juryAbi,
+                  functionName: "validationResponse",
+                  args: [requestHash, validationScore, validationResponseUri, "0x0000000000000000000000000000000000000000000000000000000000000000", validationTag]
+                });
+                try {
+                  const respTxHash = await sendTx({ to: juryContractAddress, data: respData, wallet: validatorWalletClient });
+                  logEvent({ event: "orchestrator.validationResponse", mode, requestHash, score: validationScore, responseUri: validationResponseUri, tag: validationTag, txHash: respTxHash });
+                } catch (e) {
+                  logEvent({ event: "orchestrator.validationResponseFailed", mode, requestHash, error: String(e) });
+                }
+              }
+            }
+          }
+
+          if (autoFinalize) {
+            const refreshed = await publicClient.readContract({ address: taskEscrow, abi: taskEscrowAbi, functionName: "getTask", args: [taskId] });
+            const challengeDeadline = BigInt(refreshed.challengeDeadline);
+            const latestBlock = await publicClient.getBlock();
+            const now = BigInt(latestBlock.timestamp);
+
+            if (autoFastForward && challengeDeadline > 0n && challengeDeadline > now) {
+              const delta = challengeDeadline - now + 2n;
+              try {
+                await rpcRequest("evm_increaseTime", [Number(delta)]);
+                await rpcRequest("evm_mine", []);
+                logEvent({ event: "orchestrator.fastForward", mode, seconds: Number(delta) });
+              } catch (e) {
+                logEvent({ event: "orchestrator.fastForwardFailed", mode, error: String(e) });
+              }
+            }
+
+            if (requireManualFinalize) {
+              let satisfied = null;
+              try {
+                satisfied = await publicClient.readContract({ address: taskEscrow, abi: taskEscrowAbi, functionName: "validationsSatisfied", args: [taskId] });
+              } catch {}
+              logEvent({ event: "orchestrator.manualFinalizeRequired", mode, taskId, challengeDeadline: refreshed.challengeDeadline, validationsSatisfied: satisfied });
+              return;
+            }
+
+            const finalizeData = encodeFunctionData({ abi: taskEscrowAbi, functionName: "finalizeTask", args: [taskId] });
+            try {
+              const finalizeTxHash = await sendTx({ to: taskEscrow, data: finalizeData, wallet: walletClient });
+              logEvent({ event: "orchestrator.finalizeTask", mode, taskId, txHash: finalizeTxHash });
+            } catch (e) {
+              logEvent({ event: "orchestrator.finalizeFailed", mode, taskId, error: String(e) });
+            }
+          }
+        }
+
+        const finalTask = await publicClient.readContract({ address: taskEscrow, abi: taskEscrowAbi, functionName: "getTask", args: [taskId] });
+        const finalStatus = Number(finalTask.status);
+        if (finalStatus >= 5 || requireManualFinalize) {
+          entry.done = true;
+        }
+        entry.lastError = null;
+        entry.lastStatus = finalStatus;
+        saveState();
+      } catch (e) {
+        entry.lastError = String(e);
+        saveState();
+        logEvent({ event: "orchestrator.taskFailed", mode, taskId, source, error: String(e) });
+      }
+    };
+
+    if (scanOnStart) {
+      try {
+        const latestBlock = await publicClient.getBlockNumber();
+        const fromBlock = latestBlock > lookbackBlocks ? latestBlock - lookbackBlocks : 0n;
+        const chunkSize = BigInt(getArgValue(argv, "--scanChunkSize") ?? process.env.ORCH_SCAN_CHUNK_SIZE ?? "2000");
+        for (let start = fromBlock; start <= latestBlock; start += chunkSize) {
+          const end = start + chunkSize - 1n <= latestBlock ? start + chunkSize - 1n : latestBlock;
+          const logs = await publicClient.getLogs({ address: taskEscrow, topics: [taskCreatedTopic0], fromBlock: start, toBlock: end });
+          for (const log of logs) {
+            const args = ingestTaskCreated(log);
+            if (!args?.taskId) continue;
+            await processTask({ taskId: args.taskId, source: "startupScan", blockNumber: log.blockNumber });
+          }
+        }
+        state.lastScanToBlock = latestBlock.toString();
+        saveState();
+        logEvent({ event: "orchestrator.startupScan", ok: true, fromBlock: fromBlock.toString(), toBlock: latestBlock.toString() });
+      } catch (e) {
+        logEvent({ event: "orchestrator.startupScanFailed", ok: false, error: String(e) });
+      }
+    }
 
     let unwatch = () => {};
     unwatch = publicClient.watchContractEvent({
@@ -354,259 +751,7 @@ async function main() {
           const args = log.args ?? {};
           const taskId = args.taskId;
           if (!taskId) continue;
-
-          const task = await publicClient.readContract({
-            address: taskEscrow,
-            abi: taskEscrowAbi,
-            functionName: "getTask",
-            args: [taskId]
-          });
-
-          const status = Number(task.status);
-          const shouldAccept = autoAccept && status === 0;
-          const shouldSubmit =
-            autoSubmit &&
-            (status === 1 || status === 2) &&
-            String(task.taskor).toLowerCase() === account.address.toLowerCase();
-
-          if (shouldAccept) {
-            const data = encodeFunctionData({
-              abi: taskEscrowAbi,
-              functionName: "acceptTask",
-              args: [taskId]
-            });
-            const txHash = await sendTx({ to: taskEscrow, data, wallet: walletClient });
-            logEvent({ event: "orchestrator.acceptTask", mode, taskId, txHash });
-          }
-
-          if (shouldSubmit) {
-            const data = encodeFunctionData({
-              abi: taskEscrowAbi,
-              functionName: "submitWork",
-              args: [taskId, evidenceUri]
-            });
-            const txHash = await sendTx({ to: taskEscrow, data, wallet: walletClient });
-            logEvent({ event: "orchestrator.submitWork", mode, taskId, evidenceUri, txHash });
-
-            if (!receiptUri && x402ProxyUrl && BigInt(x402TaskAmount) > 0n) {
-              try {
-                receiptUri = await x402Pay({
-                  url: evidenceUri,
-                  method: "EVIDENCE",
-                  amount: x402TaskAmount,
-                  payerAddress: account.address
-                });
-                logEvent({ event: "orchestrator.x402Pay", mode, kind: "task", receiptUri });
-              } catch (e) {
-                logEvent({ event: "orchestrator.x402PayFailed", mode, kind: "task", error: String(e) });
-              }
-            }
-
-            if (receiptUri) {
-              const receiptId = keccak256(toHex(receiptUri));
-              const linkReceiptData = encodeFunctionData({
-                abi: taskEscrowAbi,
-                functionName: "linkReceipt",
-                args: [taskId, receiptId, receiptUri]
-              });
-              const linkReceiptTxHash = await sendTx({ to: taskEscrow, data: linkReceiptData, wallet: walletClient });
-              logEvent({ event: "orchestrator.linkReceipt", mode, taskId, receiptId, receiptUri, txHash: linkReceiptTxHash });
-            }
-
-            if (validationMinCount > 0n && String(task.community).toLowerCase() === communityAccount.address.toLowerCase()) {
-              const setReqData = encodeFunctionData({
-                abi: taskEscrowAbi,
-                functionName: "setTaskValidationRequirementWithValidators",
-                args: [taskId, validationTag, validationMinCount, validationMinAvg, validationMinUnique]
-              });
-              const setReqTxHash = await sendTx({ to: taskEscrow, data: setReqData, wallet: communityWalletClient });
-              logEvent({
-                event: "orchestrator.setTaskValidationRequirementWithValidators",
-                mode,
-                taskId,
-                tag: validationTag,
-                minCount: validationMinCount.toString(),
-                minAvg: validationMinAvg,
-                minUnique: validationMinUnique,
-                txHash: setReqTxHash
-              });
-            }
-
-            const juryAbi = [
-              {
-                type: "function",
-                name: "validationRequest",
-                stateMutability: "nonpayable",
-                inputs: [
-                  { name: "validatorAddress", type: "address" },
-                  { name: "agentId", type: "uint256" },
-                  { name: "requestUri", type: "string" },
-                  { name: "requestHash", type: "bytes32" }
-                ],
-                outputs: []
-              },
-              {
-                type: "function",
-                name: "validationResponse",
-                stateMutability: "nonpayable",
-                inputs: [
-                  { name: "requestHash", type: "bytes32" },
-                  { name: "response", type: "uint8" },
-                  { name: "responseUri", type: "string" },
-                  { name: "responseHash", type: "bytes32" },
-                  { name: "tag", type: "bytes32" }
-                ],
-                outputs: []
-              },
-              {
-                type: "function",
-                name: "linkReceiptToValidation",
-                stateMutability: "nonpayable",
-                inputs: [
-                  { name: "requestHash", type: "bytes32" },
-                  { name: "receiptId", type: "bytes32" },
-                  { name: "receiptUri", type: "string" }
-                ],
-                outputs: []
-              }
-            ];
-
-            const requestHash =
-              getArgValue(argv, "--requestHash") ??
-              process.env.VALIDATION_REQUEST_HASH ??
-              keccak256(toHex(`${taskId}:${validationTag}:${validationRequestUri}`));
-
-            if (validationMinCount > 0n) {
-              const reqData = encodeFunctionData({
-                abi: juryAbi,
-                functionName: "validationRequest",
-                args: [juryContractAddress, agentId, validationRequestUri, requestHash]
-              });
-              const reqTxHash = await sendTx({ to: juryContractAddress, data: reqData, wallet: communityWalletClient });
-              logEvent({ event: "orchestrator.validationRequest", mode, requestHash, requestUri: validationRequestUri, txHash: reqTxHash });
-
-              const addReqData = encodeFunctionData({
-                abi: taskEscrowAbi,
-                functionName: "addTaskValidationRequest",
-                args: [taskId, requestHash]
-              });
-              const addReqTxHash = await sendTx({ to: taskEscrow, data: addReqData, wallet: walletClient });
-              logEvent({ event: "orchestrator.addTaskValidationRequest", mode, taskId, requestHash, txHash: addReqTxHash });
-
-              if (!validationReceiptUri && x402ProxyUrl && BigInt(x402ValidationAmount) > 0n) {
-                try {
-                  validationReceiptUri = await x402Pay({
-                    url: validationRequestUri,
-                    method: "VALIDATION",
-                    amount: x402ValidationAmount,
-                    payerAddress: communityAccount.address
-                  });
-                  logEvent({ event: "orchestrator.x402Pay", mode, kind: "validation", receiptUri: validationReceiptUri });
-                } catch (e) {
-                  logEvent({ event: "orchestrator.x402PayFailed", mode, kind: "validation", error: String(e) });
-                }
-              }
-
-              if (validationReceiptUri) {
-                const validationReceiptId = keccak256(toHex(validationReceiptUri));
-                const linkValidationReceiptData = encodeFunctionData({
-                  abi: juryAbi,
-                  functionName: "linkReceiptToValidation",
-                  args: [requestHash, validationReceiptId, validationReceiptUri]
-                });
-                const linkValidationReceiptTxHash = await sendTx({
-                  to: juryContractAddress,
-                  data: linkValidationReceiptData,
-                  wallet: communityWalletClient
-                });
-                logEvent({
-                  event: "orchestrator.linkReceiptToValidation",
-                  mode,
-                  requestHash,
-                  receiptId: validationReceiptId,
-                  receiptUri: validationReceiptUri,
-                  txHash: linkValidationReceiptTxHash
-                });
-              }
-
-              const respData = encodeFunctionData({
-                abi: juryAbi,
-                functionName: "validationResponse",
-                args: [requestHash, validationScore, validationResponseUri, "0x0000000000000000000000000000000000000000000000000000000000000000", validationTag]
-              });
-              const respTxHash = await sendTx({ to: juryContractAddress, data: respData, wallet: validatorWalletClient });
-              logEvent({
-                event: "orchestrator.validationResponse",
-                mode,
-                requestHash,
-                score: validationScore,
-                responseUri: validationResponseUri,
-                tag: validationTag,
-                txHash: respTxHash
-              });
-            }
-
-            if (autoFinalize) {
-              const refreshed = await publicClient.readContract({
-                address: taskEscrow,
-                abi: taskEscrowAbi,
-                functionName: "getTask",
-                args: [taskId]
-              });
-
-              const challengeDeadline = BigInt(refreshed.challengeDeadline);
-              const latestBlock = await publicClient.getBlock();
-              const now = BigInt(latestBlock.timestamp);
-
-              if (autoFastForward && challengeDeadline > 0n && challengeDeadline > now) {
-                const delta = challengeDeadline - now + 2n;
-                try {
-                  await rpcRequest("evm_increaseTime", [Number(delta)]);
-                  await rpcRequest("evm_mine", []);
-                  logEvent({ event: "orchestrator.fastForward", mode, seconds: Number(delta) });
-                } catch (e) {
-                  logEvent({ event: "orchestrator.fastForwardFailed", mode, error: String(e) });
-                }
-              }
-
-              if (requireManualFinalize) {
-                let satisfied = null;
-                try {
-                  satisfied = await publicClient.readContract({
-                    address: taskEscrow,
-                    abi: taskEscrowAbi,
-                    functionName: "validationsSatisfied",
-                    args: [taskId]
-                  });
-                } catch {}
-                logEvent({
-                  event: "orchestrator.manualFinalizeRequired",
-                  mode,
-                  taskId,
-                  challengeDeadline: refreshed.challengeDeadline,
-                  validationsSatisfied: satisfied
-                });
-                if (once) {
-                  unwatch();
-                  process.exit(0);
-                }
-                continue;
-              }
-
-              const finalizeData = encodeFunctionData({
-                abi: taskEscrowAbi,
-                functionName: "finalizeTask",
-                args: [taskId]
-              });
-
-              try {
-                const finalizeTxHash = await sendTx({ to: taskEscrow, data: finalizeData, wallet: walletClient });
-                logEvent({ event: "orchestrator.finalizeTask", mode, taskId, txHash: finalizeTxHash });
-              } catch (e) {
-                logEvent({ event: "orchestrator.finalizeFailed", mode, taskId, error: String(e) });
-              }
-            }
-          }
+          await processTask({ taskId, source: "watch", blockNumber: log.blockNumber });
 
           if (once) {
             unwatch();
