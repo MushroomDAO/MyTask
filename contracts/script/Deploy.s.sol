@@ -148,6 +148,18 @@ contract DemoLifecycle is Script {
         _advance();
         jury.setRequireNonZeroValidationRequestHash(true);
         _advance();
+        jury.setRequireJurorRole(true);
+        _advance();
+        jury.setRequireValidationRequesterRole(true);
+        _advance();
+        jury.grantRole(jury.ROLE_JUROR(), juror1);
+        _advance();
+        jury.grantRole(jury.ROLE_JUROR(), juror2);
+        _advance();
+        jury.grantRole(jury.ROLE_JUROR(), juror3);
+        _advance();
+        jury.grantRole(jury.ROLE_VALIDATION_REQUESTER(), taskor);
+        _advance();
         escrow = new TaskEscrow(address(jury), feeRecipient);
 
         _advance();

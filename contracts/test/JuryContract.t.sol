@@ -8,6 +8,7 @@ import {ERC20Mock} from "./mocks/ERC20Mock.sol";
 
 contract MySBTMock {
     mapping(uint256 => address) private _owners;
+    mapping(uint256 => bool) private _revoked;
 
     function mint(address to, uint256 tokenId) external {
         require(to != address(0), "Invalid to");
@@ -19,6 +20,18 @@ contract MySBTMock {
         address owner = _owners[tokenId];
         require(owner != address(0), "NOT_MINTED");
         return owner;
+    }
+
+    function isRevoked(uint256 tokenId) external view returns (bool) {
+        address owner = _owners[tokenId];
+        require(owner != address(0), "NOT_MINTED");
+        return _revoked[tokenId];
+    }
+
+    function setRevoked(uint256 tokenId, bool revoked) external {
+        address owner = _owners[tokenId];
+        require(owner != address(0), "NOT_MINTED");
+        _revoked[tokenId] = revoked;
     }
 }
 
@@ -254,6 +267,31 @@ contract JuryContractTest is Test {
         bytes32 expected = keccak256(abi.encode(block.chainid, taskId, AGENT_ID, address(jury), tag, requestUri));
         bytes32 actual = jury.deriveValidationRequestHash(taskId, AGENT_ID, address(jury), tag, requestUri);
         assertEq(actual, expected);
+    }
+
+    function test_CreateTaskRejectsRevokedAgentId() public {
+        sbt.setRevoked(AGENT_ID, true);
+        IJuryContract.TaskParams memory params = IJuryContract.TaskParams({
+            agentId: AGENT_ID,
+            taskType: IJuryContract.TaskType.CONSENSUS_REQUIRED,
+            evidenceUri: "ipfs://QmEvidence",
+            reward: 1 ether,
+            deadline: block.timestamp + 7 days,
+            minJurors: 3,
+            consensusThreshold: 6600
+        });
+
+        vm.prank(taskCreator);
+        vm.expectRevert("Invalid agentId");
+        jury.createTask(params);
+    }
+
+    function test_ValidationRequestRejectsRevokedAgentId() public {
+        sbt.setRevoked(AGENT_ID, true);
+        bytes32 requestHash = keccak256("revoked-agent");
+        vm.prank(taskCreator);
+        vm.expectRevert("Invalid agentId");
+        jury.validationRequest(address(jury), AGENT_ID, "ipfs://request", requestHash);
     }
 
     function test_TagRoleGatesValidationResponse() public {

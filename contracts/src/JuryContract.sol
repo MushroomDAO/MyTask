@@ -6,6 +6,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 interface IMySBT {
     function ownerOf(uint256 tokenId) external view returns (address);
+    function isRevoked(uint256 tokenId) external view returns (bool);
 }
 
 /**
@@ -191,6 +192,9 @@ contract JuryContract is IJuryContract {
         require(params.deadline > block.timestamp, "Invalid deadline");
         require(params.minJurors > 0, "Min jurors must be > 0");
         require(params.consensusThreshold <= 10000, "Invalid threshold");
+        if (mySBT.code.length > 0) {
+            require(_agentIdIsActive(params.agentId), "Invalid agentId");
+        }
 
         _taskCounter++;
         taskHash = keccak256(abi.encode(msg.sender, _taskCounter, params.agentId, params.taskType));
@@ -446,7 +450,7 @@ contract JuryContract is IJuryContract {
             require(_roles[ROLE_VALIDATION_REQUESTER][msg.sender], "Missing role");
         }
         if (mySBT.code.length > 0) {
-            require(_agentIdExists(agentId), "Invalid agentId");
+            require(_agentIdIsActive(agentId), "Invalid agentId");
         }
         if (requireNonZeroValidationRequestHash) {
             require(requestHash != bytes32(0), "requestHash required");
@@ -518,9 +522,13 @@ contract JuryContract is IJuryContract {
         emit ValidationResponse(msg.sender, task.agentId, requestHash, response, responseUri, tag);
     }
 
-    function _agentIdExists(uint256 agentId) internal view returns (bool) {
+    function _agentIdIsActive(uint256 agentId) internal view returns (bool) {
         try IMySBT(mySBT).ownerOf(agentId) returns (address owner) {
-            return owner != address(0);
+            if (owner == address(0)) return false;
+            try IMySBT(mySBT).isRevoked(agentId) returns (bool revoked) {
+                if (revoked) return false;
+            } catch {}
+            return true;
         } catch {
             return false;
         }
