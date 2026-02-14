@@ -30,6 +30,43 @@ function stableStringify(v) {
   return "null";
 }
 
+function _tryParseArtifactJson(uri) {
+  if (!uri) return null;
+  const raw = String(uri).trim();
+  if (!raw) return null;
+
+  try {
+    if (raw.startsWith("{") || raw.startsWith("[")) return JSON.parse(raw);
+  } catch {}
+
+  const lower = raw.toLowerCase();
+  if (lower.startsWith("data:application/json;base64,")) {
+    const base64 = raw.slice("data:application/json;base64,".length);
+    try {
+      const decoded = Buffer.from(base64, "base64").toString("utf8");
+      return JSON.parse(decoded);
+    } catch {}
+  }
+
+  if (lower.startsWith("data:application/json,")) {
+    const encoded = raw.slice("data:application/json,".length);
+    try {
+      const decoded = decodeURIComponent(encoded);
+      return JSON.parse(decoded);
+    } catch {}
+  }
+
+  return null;
+}
+
+function buildArtifactInfo(uri) {
+  const payload = _tryParseArtifactJson(uri);
+  if (payload == null) return null;
+  const canonical = stableStringify(payload);
+  const digest = keccak256(toHex(canonical));
+  return { digest, canonical, payload };
+}
+
 function jsonStringifySafe(value, space) {
   return JSON.stringify(value, (key, v) => (typeof v === "bigint" ? v.toString() : v), space);
 }
@@ -491,14 +528,14 @@ async function main() {
 
   const getValidationArtifacts = (requestHash) => {
     const v = state.validations[requestHash];
-    if (!v || !Array.isArray(v.events)) return { requestUri: null, responseUri: null };
+    if (!v || !Array.isArray(v.events)) return { requestUri: null, responseUri: null, requestArtifact: null, responseArtifact: null };
     let requestUri = null;
     let responseUri = null;
     for (const e of v.events) {
       if (e?.name === "ValidationRequest" && e?.args?.requestUri) requestUri = e.args.requestUri;
       if (e?.name === "ValidationResponse" && e?.args?.responseUri) responseUri = e.args.responseUri;
     }
-    return { requestUri, responseUri };
+    return { requestUri, responseUri, requestArtifact: buildArtifactInfo(requestUri), responseArtifact: buildArtifactInfo(responseUri) };
   };
 
   const rewardActionAbi = [
@@ -615,6 +652,8 @@ async function main() {
         lastUpdate: status[4].toString(),
         requestUri: artifacts.requestUri,
         responseUri: artifacts.responseUri,
+        requestArtifact: artifacts.requestArtifact,
+        responseArtifact: artifacts.responseArtifact,
         receipts: validationReceipts
       });
 

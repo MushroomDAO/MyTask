@@ -137,6 +137,12 @@ function deriveReceiptId(receiptUri) {
   return keccak256(toHex(String(receiptUri ?? "").trim()));
 }
 
+function buildDataJsonUri(payload) {
+  const canonical = stableStringify(payload);
+  const base64 = Buffer.from(canonical, "utf8").toString("base64");
+  return `data:application/json;base64,${base64}`;
+}
+
 function deriveErc8004RequestHash({ chainId, taskId, agentId, validatorAddress, tag, requestUri }) {
   const bytes = encodeAbiParameters(
     [
@@ -401,14 +407,8 @@ async function main() {
     const validationMinCount = BigInt(getArgValue(argv, "--validationMinCount") ?? process.env.VALIDATION_MIN_COUNT ?? "0");
     const validationMinAvg = Number(getArgValue(argv, "--validationMinAvg") ?? process.env.VALIDATION_MIN_AVG ?? "0");
     const validationMinUnique = Number(getArgValue(argv, "--validationMinUnique") ?? process.env.VALIDATION_MIN_UNIQUE ?? "0");
-    const validationRequestUri =
-      getArgValue(argv, "--validationRequestUri") ??
-      process.env.VALIDATION_REQUEST_URI ??
-      "ipfs://validation-request";
-    const validationResponseUri =
-      getArgValue(argv, "--validationResponseUri") ??
-      process.env.VALIDATION_RESPONSE_URI ??
-      "ipfs://validation-response";
+    const validationRequestUriRaw = getArgValue(argv, "--validationRequestUri") ?? process.env.VALIDATION_REQUEST_URI ?? null;
+    const validationResponseUriRaw = getArgValue(argv, "--validationResponseUri") ?? process.env.VALIDATION_RESPONSE_URI ?? null;
     const validationScore = Number(getArgValue(argv, "--validationScore") ?? process.env.VALIDATION_SCORE ?? "80");
     let validationReceiptUri = getArgValue(argv, "--validationReceiptUri") ?? process.env.VALIDATION_RECEIPT_URI;
 
@@ -929,6 +929,18 @@ async function main() {
             }
           ];
 
+          const validationRequestUri =
+            validationRequestUriRaw ??
+            buildDataJsonUri({
+              schema: "aastar.erc8004.validationRequest@v1",
+              chainId: String(chainId),
+              taskId,
+              agentId: agentId.toString(),
+              validatorAddress: juryContractAddress,
+              tag: validationTag,
+              evidenceUri
+            });
+
           const requestHash =
             getArgValue(argv, "--requestHash") ??
             process.env.VALIDATION_REQUEST_HASH ??
@@ -965,6 +977,19 @@ async function main() {
           } catch (e) {
             logTaskEvent({ event: "orchestrator.requestHashCheckUnavailable", ok: true, mode, error: String(e) });
           }
+
+          const validationResponseUri =
+            validationResponseUriRaw ??
+            buildDataJsonUri({
+              schema: "aastar.erc8004.validationResponse@v1",
+              chainId: String(chainId),
+              taskId,
+              agentId: agentId.toString(),
+              validatorAddress: validatorAccount.address,
+              tag: validationTag,
+              response: validationScore,
+              requestHash
+            });
 
           entry.requestHash = entry.requestHash ?? requestHash;
           entry.validation = entry.validation ?? {};
