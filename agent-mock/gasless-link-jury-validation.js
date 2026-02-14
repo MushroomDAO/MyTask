@@ -99,6 +99,44 @@ function stableStringify(v) {
   return "null";
 }
 
+function _tryParseReceiptJson(receiptUri) {
+  if (!receiptUri) return null;
+  const raw = String(receiptUri).trim();
+  if (!raw) return null;
+
+  try {
+    if (raw.startsWith("{") || raw.startsWith("[")) return JSON.parse(raw);
+  } catch {}
+
+  const lower = raw.toLowerCase();
+  if (lower.startsWith("data:application/json;base64,")) {
+    const base64 = raw.slice("data:application/json;base64,".length);
+    try {
+      const decoded = Buffer.from(base64, "base64").toString("utf8");
+      return JSON.parse(decoded);
+    } catch {}
+  }
+
+  if (lower.startsWith("data:application/json,")) {
+    const encoded = raw.slice("data:application/json,".length);
+    try {
+      const decoded = decodeURIComponent(encoded);
+      return JSON.parse(decoded);
+    } catch {}
+  }
+
+  return null;
+}
+
+function deriveReceiptId(receiptUri) {
+  const obj = _tryParseReceiptJson(receiptUri);
+  if (obj != null) {
+    const canonical = stableStringify(obj);
+    return keccak256(toHex(canonical));
+  }
+  return keccak256(toHex(String(receiptUri ?? "").trim()));
+}
+
 function deriveErc8004RequestHash({ chainId, taskId, agentId, validatorAddress, tag, requestUri }) {
   const bytes = encodeAbiParameters(
     [
@@ -1018,7 +1056,7 @@ async function main() {
             }
 
             if (validationReceiptUri) {
-              const validationReceiptId = keccak256(toHex(validationReceiptUri));
+              const validationReceiptId = deriveReceiptId(validationReceiptUri);
               const linkValidationReceiptData = encodeFunctionData({
                 abi: juryAbi,
                 functionName: "linkReceiptToValidation",
@@ -1383,7 +1421,7 @@ async function main() {
         ? receiptIdRaw.startsWith("0x")
           ? receiptIdRaw
           : `0x${receiptIdRaw}`
-        : keccak256(toHex(receiptUri))
+        : deriveReceiptId(receiptUri)
       : undefined;
 
   const paymasterVerificationGas = BigInt(getArgValue(argv, "--paymasterVerificationGas") ?? process.env.PAYMASTER_VERIFICATION_GAS ?? "200000");
