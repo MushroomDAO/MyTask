@@ -62,6 +62,115 @@ flowchart TB
     ESC -.->|"Distribute"| F5
 ```
 
+## System Architecture (Simple)
+
+```mermaid
+flowchart LR
+  subgraph Offchain["Offchain (Agent Runtime + Services)"]
+    ORCH["Orchestrator<br/>agent-mock/gasless-link-jury-validation.js"]
+    IDX["Indexer + Dashboard<br/>agent-mock/indexer.js"]
+    XPROXY["x402 Proxy + Receipt Store<br/>agent-mock/x402-proxy.js"]
+    STORE["Offchain URIs<br/>IPFS/HTTP"]
+  end
+
+  subgraph Onchain["Onchain (MyTask + MyShop)"]
+    ESCROW["TaskEscrow / TaskEscrowV2<br/>task lifecycle + settlement"]
+    JURY["JuryContract<br/>ERC-8004 validations + jury voting"]
+    SBT["MySBT<br/>agentId → owner"]
+    SHOP["MyShopItems + RewardAction<br/>reward trigger + event"]
+  end
+
+  ORCH -->|writes txs| ESCROW
+  ORCH -->|validationRequest/Response| JURY
+  JURY -->|ownerOf(agentId)| SBT
+
+  ORCH -->|pays 402| XPROXY -->|receiptUri| ORCH
+  ORCH -->|links receipts / stores URIs| STORE
+
+  ESCROW -->|events| IDX
+  JURY -->|events| IDX
+  SHOP -->|RewardIssued| IDX
+  ORCH -->|reward trigger (EOA payer)| SHOP
+```
+
+## Main Components (Structure)
+
+```mermaid
+flowchart TB
+  subgraph Contracts["Contracts (Foundry)"]
+    ESC["TaskEscrowV2"]
+    ESC1["TaskEscrow"]
+    JR["JuryContract"]
+    SBT["MySBT"]
+  end
+
+  subgraph AgentMock["agent-mock (Node + viem)"]
+    ORCH["orchestrateTasks<br/>task automation"]
+    IDX["indexer<br/>JSON state + dashboard"]
+    X402["x402-proxy<br/>payments + receipts"]
+  end
+
+  subgraph External["External / Other Repos"]
+    SHOP["MyShop (MyShopItems + RewardAction)"]
+    RES["x402-protected resources<br/>(APIs/tools/data)"]
+  end
+
+  ORCH -->|create/accept/submit/link/complete| ESC
+  ORCH -->|createTask/submitEvidence/vote/finalize| JR
+  JR -->|MySBT.ownerOf(agentId)| SBT
+  ORCH -->|buy(...extraData)| SHOP
+  X402 <-->|402 challenge/receipt| RES
+
+  ESC -->|events| IDX
+  JR -->|events| IDX
+  SHOP -->|events| IDX
+  ORCH -->|calls| X402
+```
+
+## End-to-End Workflow (Tasks + x402 + ERC-8004 + Rewards)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant Community as Community (EOA)
+  participant Taskor as Taskor (EOA)
+  participant Orchestrator as Orchestrator (agent-mock)
+  participant Escrow as TaskEscrow(V2)
+  participant X402 as x402 Proxy
+  participant Resource as Resource API
+  participant Jury as JuryContract
+  participant MySBT as MySBT
+  participant Shop as MyShopItems/RewardAction
+  participant Indexer as Indexer
+
+  Community->>Escrow: createTask(...)
+  Escrow-->>Indexer: TaskCreated(taskId,...)
+  Taskor->>Escrow: acceptTask(taskId)
+  Taskor->>Escrow: submitEvidence(taskId, evidenceUri)
+  Escrow-->>Indexer: EvidenceSubmitted(taskId,evidenceUri)
+
+  Orchestrator->>X402: request resource (402)
+  X402->>Resource: pay + fetch
+  Resource-->>X402: response
+  X402-->>Orchestrator: receiptUri + response
+  Orchestrator->>Escrow: linkReceipt(taskId, receiptId, receiptUri)
+  Escrow-->>Indexer: ReceiptLinked(taskId, receiptId, receiptUri)
+
+  Orchestrator->>Jury: deriveValidationRequestHash(taskId,agentId,validator,tag,requestUri)
+  Orchestrator->>Jury: validationRequest(validator, agentId, requestUri, requestHash)
+  Jury->>MySBT: ownerOf(agentId)
+  Jury-->>Indexer: ValidationRequested(requestHash,...)
+  Orchestrator->>Jury: validationResponse(requestHash, score, responseUri, ..., tag)
+  Jury-->>Indexer: ValidationResponded(requestHash,score,tag)
+
+  Orchestrator->>Escrow: linkJuryValidation(taskId, juryTaskHash)
+  Orchestrator->>Escrow: completeTask(taskId)
+  Escrow-->>Indexer: TaskCompleted(taskId,payouts)
+
+  Orchestrator->>Shop: buy(itemId, qty, recipient, extraData)
+  Shop-->>Indexer: RewardIssued(taskId,juryTaskHash,recipient,...)
+```
+
 ## Four-Party Economic Model
 
 | Role | Responsibility | AI Agent Function | Incentive |
@@ -350,6 +459,71 @@ flowchart TB
     X402 -.->|"无Gas支付"| F2
     JURY -.->|"共识"| F4
     ESC -.->|"分配"| F5
+```
+
+## 系统架构（简图）
+
+```mermaid
+flowchart LR
+  subgraph Offchain["链下（Agent Runtime + Services）"]
+    ORCH["Orchestrator<br/>agent-mock/gasless-link-jury-validation.js"]
+    IDX["Indexer + Dashboard<br/>agent-mock/indexer.js"]
+    XPROXY["x402 Proxy + Receipt Store<br/>agent-mock/x402-proxy.js"]
+    STORE["链下 URI<br/>IPFS/HTTP"]
+  end
+
+  subgraph Onchain["链上（MyTask + MyShop）"]
+    ESCROW["TaskEscrow / TaskEscrowV2<br/>任务生命周期 + 结算"]
+    JURY["JuryContract<br/>ERC-8004 验证 + Jury 投票"]
+    SBT["MySBT<br/>agentId → owner"]
+    SHOP["MyShopItems + RewardAction<br/>奖励触发 + 事件"]
+  end
+
+  ORCH -->|写链上交易| ESCROW
+  ORCH -->|validationRequest/Response| JURY
+  JURY -->|ownerOf(agentId)| SBT
+
+  ORCH -->|支付 402| XPROXY -->|receiptUri| ORCH
+  ORCH -->|挂接回执 / 存储 URI| STORE
+
+  ESCROW -->|events| IDX
+  JURY -->|events| IDX
+  SHOP -->|RewardIssued| IDX
+  ORCH -->|奖励触发（EOA payer）| SHOP
+```
+
+## 组件结构（主关系）
+
+```mermaid
+flowchart TB
+  subgraph Contracts["合约（Foundry）"]
+    ESC["TaskEscrowV2"]
+    ESC1["TaskEscrow"]
+    JR["JuryContract"]
+    SBT["MySBT"]
+  end
+
+  subgraph AgentMock["agent-mock（Node + viem）"]
+    ORCH["orchestrateTasks<br/>任务自动化"]
+    IDX["indexer<br/>JSON state + dashboard"]
+    X402["x402-proxy<br/>支付 + 回执"]
+  end
+
+  subgraph External["外部 / 其他 Repo"]
+    SHOP["MyShop（MyShopItems + RewardAction）"]
+    RES["x402 保护的资源<br/>(API/工具/数据)"]
+  end
+
+  ORCH -->|create/accept/submit/link/complete| ESC
+  ORCH -->|validationRequest/Response| JR
+  JR -->|MySBT.ownerOf(agentId)| SBT
+  ORCH -->|buy(...extraData)| SHOP
+  X402 <-->|402 挑战/receipt| RES
+
+  ESC -->|events| IDX
+  JR -->|events| IDX
+  SHOP -->|events| IDX
+  ORCH -->|calls| X402
 ```
 
 ## 四方经济模型
