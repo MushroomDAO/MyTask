@@ -242,6 +242,7 @@ async function main() {
   const serve = parseBool(getArgValue(argv, "--serve") ?? process.env.INDEXER_SERVE, false);
   const port = Number(getArgValue(argv, "--port") ?? process.env.INDEXER_PORT ?? "8790");
   const x402Mock = parseBool(getArgValue(argv, "--x402Mock") ?? process.env.INDEXER_X402_MOCK, false);
+  const x402PoliciesJson = getArgValue(argv, "--x402PoliciesJson") ?? process.env.INDEXER_X402_POLICIES_JSON ?? null;
   const taskEscrow = normalizeHexAddress(
     getArgValue(argv, "--taskEscrow") ?? process.env.TASK_ESCROW_ADDRESS ?? requireEnv("TASK_ESCROW_ADDRESS")
   );
@@ -800,14 +801,34 @@ async function main() {
 
   if (!serve) return;
 
+  const x402Policies = (() => {
+    if (!x402PoliciesJson) return {};
+    try {
+      const parsed = JSON.parse(String(x402PoliciesJson));
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  })();
+
   let agentMockStore = null;
   if (agentMock || x402Mock) {
     ensureDir(path.dirname(agentMockStoreFile));
-    agentMockStore = readJsonRecovering(agentMockStoreFile, { version: 1, order: [], requests: {}, receiptOrder: [], receipts: {} });
+    agentMockStore = readJsonRecovering(agentMockStoreFile, {
+      version: 1,
+      order: [],
+      requests: {},
+      receiptOrder: [],
+      receipts: {},
+      x402: { byPolicy: {} }
+    });
     agentMockStore.order = Array.isArray(agentMockStore.order) ? agentMockStore.order : [];
     agentMockStore.requests = agentMockStore.requests && typeof agentMockStore.requests === "object" ? agentMockStore.requests : {};
     agentMockStore.receiptOrder = Array.isArray(agentMockStore.receiptOrder) ? agentMockStore.receiptOrder : [];
     agentMockStore.receipts = agentMockStore.receipts && typeof agentMockStore.receipts === "object" ? agentMockStore.receipts : {};
+    agentMockStore.x402 = agentMockStore.x402 && typeof agentMockStore.x402 === "object" ? agentMockStore.x402 : { byPolicy: {} };
+    agentMockStore.x402.byPolicy =
+      agentMockStore.x402.byPolicy && typeof agentMockStore.x402.byPolicy === "object" ? agentMockStore.x402.byPolicy : {};
   }
 
   const saveAgentMockStore = () => {
@@ -901,19 +922,113 @@ async function main() {
         return sendJson(res, 400, { error: "invalid-json" });
       }
 
+      const policyIdRaw = body?.policyId != null ? String(body.policyId) : null;
+      const policyId = policyIdRaw && policyIdRaw.trim() ? policyIdRaw.trim() : "default";
+      const policyCfg =
+        (x402Policies && typeof x402Policies === "object" ? x402Policies[policyId] : null) ??
+        (x402Policies && typeof x402Policies === "object" ? x402Policies.default : null) ??
+        null;
+
+      const amountRaw = body?.amount != null ? String(body.amount) : "0";
+      let amount = 0n;
+      try {
+        amount = BigInt(amountRaw);
+      } catch {
+        logEvent({ event: "indexer.http", ok: false, traceId, method: req.method, path: p, code: 400, error: "invalid-amount" });
+        return sendJson(res, 400, { error: "invalid-amount" });
+      }
+
+      const agentId = body?.agentId != null ? String(body.agentId) : null;
+      const sponsorAddress = body?.sponsorAddress != null ? String(body.sponsorAddress) : null;
+
+      const policyViolations = [];
+      if (policyCfg && typeof policyCfg === "object") {
+        const maxPerRequestRaw = policyCfg.maxPerRequest != null ? String(policyCfg.maxPerRequest) : null;
+        if (maxPerRequestRaw) {
+          try {
+            const maxPerRequest = BigInt(maxPerRequestRaw);
+            if (amount > maxPerRequest) policyViolations.push({ rule: "maxPerRequest", max: maxPerRequestRaw });
+          } catch {}
+        }
+
+        const sponsorAllowlist = Array.isArray(policyCfg.sponsorAllowlist) ? policyCfg.sponsorAllowlist.map(String) : null;
+        if (sponsorAllowlist && sponsorAddress && !sponsorAllowlist.map((x) => x.toLowerCase()).includes(sponsorAddress.toLowerCase())) {
+          policyViolations.push({ rule: "sponsorAllowlist" });
+        }
+
+        const dayKey = new Date().toISOString().slice(0, 10);
+        const byPolicy = agentMockStore?.x402?.byPolicy && typeof agentMockStore.x402.byPolicy === "object" ? agentMockStore.x402.byPolicy : {};
+        if (agentMockStore?.x402) agentMockStore.x402.byPolicy = byPolicy;
+        byPolicy[policyId] = byPolicy[policyId] ?? { agentDaySpend: {}, sponsorSpend: {} };
+        const policyBucket = byPolicy[policyId];
+        policyBucket.agentDaySpend =
+          policyBucket.agentDaySpend && typeof policyBucket.agentDaySpend === "object" ? policyBucket.agentDaySpend : {};
+        policyBucket.sponsorSpend =
+          policyBucket.sponsorSpend && typeof policyBucket.sponsorSpend === "object" ? policyBucket.sponsorSpend : {};
+
+        const maxPerAgentPerDayRaw = policyCfg.maxPerAgentPerDay != null ? String(policyCfg.maxPerAgentPerDay) : null;
+        if (maxPerAgentPerDayRaw && agentId) {
+          try {
+            const maxPerAgentPerDay = BigInt(maxPerAgentPerDayRaw);
+            const agentDays = (policyBucket.agentDaySpend[agentId] =
+              policyBucket.agentDaySpend[agentId] && typeof policyBucket.agentDaySpend[agentId] === "object"
+                ? policyBucket.agentDaySpend[agentId]
+                : {});
+            const prevRaw = agentDays[dayKey] != null ? String(agentDays[dayKey]) : "0";
+            const prev = BigInt(prevRaw);
+            if (prev + amount > maxPerAgentPerDay) {
+              policyViolations.push({ rule: "maxPerAgentPerDay", max: maxPerAgentPerDayRaw, dayKey, used: prevRaw });
+            }
+          } catch {}
+        }
+
+        const sponsorBudgets = policyCfg.sponsorBudgets && typeof policyCfg.sponsorBudgets === "object" ? policyCfg.sponsorBudgets : null;
+        if (sponsorBudgets && sponsorAddress) {
+          const budgetRaw = sponsorBudgets[sponsorAddress] != null ? String(sponsorBudgets[sponsorAddress]) : null;
+          if (budgetRaw) {
+            try {
+              const budget = BigInt(budgetRaw);
+              const prevRaw = policyBucket.sponsorSpend[sponsorAddress] != null ? String(policyBucket.sponsorSpend[sponsorAddress]) : "0";
+              const prev = BigInt(prevRaw);
+              if (prev + amount > budget) {
+                policyViolations.push({ rule: "sponsorBudget", budget: budgetRaw, used: prevRaw });
+              }
+            } catch {}
+          }
+        }
+      }
+
+      if (policyViolations.length > 0) {
+        logEvent({
+          event: "indexer.http",
+          ok: false,
+          traceId,
+          method: req.method,
+          path: p,
+          code: 402,
+          x402Mock: true,
+          policyId,
+          agentId,
+          sponsorAddress,
+          amount: amountRaw,
+          policyViolations
+        });
+        return sendJson(res, 402, { error: "policy-violation", policyId, violations: policyViolations });
+      }
+
       const receivedAt = new Date().toISOString();
       const payload = {
         schema: "aastar.x402.receipt@v1",
         receivedAt,
         url: body?.url ?? null,
         method: body?.method ?? null,
-        amount: body?.amount != null ? String(body.amount) : null,
+        amount: amountRaw,
         currency: body?.currency ?? null,
         payerAddress: body?.payerAddress ?? null,
-        agentId: body?.agentId != null ? String(body.agentId) : null,
+        agentId,
         chainId: body?.chainId != null ? String(body.chainId) : String(chainId),
-        sponsorAddress: body?.sponsorAddress ?? null,
-        policyId: body?.policyId ?? null,
+        sponsorAddress,
+        policyId,
         metadata: body?.metadata ?? null,
         status: "paid"
       };
@@ -923,9 +1038,48 @@ async function main() {
       const receiptId = digest;
       const receiptUri = buildDataJsonUri(payload);
 
+      if (policyCfg && typeof policyCfg === "object") {
+        const dayKey = receivedAt.slice(0, 10);
+        const byPolicy = agentMockStore?.x402?.byPolicy && typeof agentMockStore.x402.byPolicy === "object" ? agentMockStore.x402.byPolicy : {};
+        if (agentMockStore?.x402) agentMockStore.x402.byPolicy = byPolicy;
+        byPolicy[policyId] = byPolicy[policyId] ?? { agentDaySpend: {}, sponsorSpend: {} };
+        const policyBucket = byPolicy[policyId];
+        policyBucket.agentDaySpend =
+          policyBucket.agentDaySpend && typeof policyBucket.agentDaySpend === "object" ? policyBucket.agentDaySpend : {};
+        policyBucket.sponsorSpend =
+          policyBucket.sponsorSpend && typeof policyBucket.sponsorSpend === "object" ? policyBucket.sponsorSpend : {};
+
+        if (agentId) {
+          const agentDays = (policyBucket.agentDaySpend[agentId] =
+            policyBucket.agentDaySpend[agentId] && typeof policyBucket.agentDaySpend[agentId] === "object"
+              ? policyBucket.agentDaySpend[agentId]
+              : {});
+          const prevRaw = agentDays[dayKey] != null ? String(agentDays[dayKey]) : "0";
+          agentDays[dayKey] = (BigInt(prevRaw) + amount).toString();
+        }
+
+        if (sponsorAddress) {
+          const prevRaw = policyBucket.sponsorSpend[sponsorAddress] != null ? String(policyBucket.sponsorSpend[sponsorAddress]) : "0";
+          policyBucket.sponsorSpend[sponsorAddress] = (BigInt(prevRaw) + amount).toString();
+        }
+        saveAgentMockStore();
+      }
+
       rememberX402Receipt(receiptId, { receivedAt, receiptId, digest, canonical, payload, receiptUri });
       logEvent({ event: "indexer.http", ok: true, traceId, method: req.method, path: p, code: 200, x402Mock: true, receiptId });
       return sendJson(res, 200, { ok: true, receiptId, receiptUri, digest });
+    }
+
+    if (x402Mock && req.method === "GET" && p === "/x402/policies") {
+      logEvent({ event: "indexer.http", ok: true, traceId, method: req.method, path: p, code: 200, x402Mock: true });
+      return sendJson(res, 200, { ok: true, policies: x402Policies });
+    }
+
+    if (x402Mock && req.method === "GET" && p === "/x402/spend") {
+      const policyId = u.searchParams.get("policyId") ?? "default";
+      const spend = agentMockStore?.x402?.byPolicy?.[policyId] ?? null;
+      logEvent({ event: "indexer.http", ok: true, traceId, method: req.method, path: p, code: 200, x402Mock: true, policyId });
+      return sendJson(res, 200, { ok: true, policyId, spend });
     }
 
     if (x402Mock && req.method === "GET" && p.startsWith("/receipts/")) {
