@@ -900,6 +900,115 @@ async function main() {
     return arr;
   };
 
+  const getSpendByPolicyForAgent = (agentId) => {
+    const out = {};
+    const byPolicy = agentMockStore?.x402?.byPolicy;
+    if (!byPolicy || typeof byPolicy !== "object") return out;
+    for (const policyId of Object.keys(byPolicy)) {
+      const bucket = byPolicy[policyId];
+      const agentDaySpend = bucket?.agentDaySpend?.[agentId];
+      if (!agentDaySpend || typeof agentDaySpend !== "object") continue;
+      let total = 0n;
+      let latestDay = null;
+      for (const dayKey of Object.keys(agentDaySpend)) {
+        const vRaw = agentDaySpend[dayKey] != null ? String(agentDaySpend[dayKey]) : "0";
+        let v = 0n;
+        try {
+          v = BigInt(vRaw);
+        } catch {}
+        total += v;
+        if (!latestDay || dayKey > latestDay) latestDay = dayKey;
+      }
+      out[policyId] = { total: total.toString(), latestDay, byDay: agentDaySpend };
+    }
+    return out;
+  };
+
+  const buildAgentPerformance = (agentId) => {
+    const byTag = {};
+    const tasksSet = new Set();
+    let lastUpdate = 0n;
+    let totalCount = 0;
+    let totalResponse = 0;
+
+    for (const taskId of Object.keys(finalState.tasks ?? {})) {
+      const t = finalState.tasks[taskId];
+      const vals = t?.validations ?? [];
+      for (const v of vals) {
+        if (String(v?.agentId ?? "") !== String(agentId)) continue;
+        const lu = BigInt(v?.lastUpdate ?? "0");
+        if (lu > lastUpdate) lastUpdate = lu;
+        tasksSet.add(taskId);
+        totalCount += 1;
+        totalResponse += Number(v?.response ?? 0);
+        const tag = String(v?.tag ?? "");
+        if (!tag) continue;
+        const cur = byTag[tag] ?? { count: 0, total: 0 };
+        cur.count += 1;
+        cur.total += Number(v?.response ?? 0);
+        byTag[tag] = cur;
+      }
+    }
+
+    const tags = {};
+    for (const tag of Object.keys(byTag)) {
+      const v = byTag[tag];
+      tags[tag] = { count: v.count, avg: v.count > 0 ? Math.floor(v.total / v.count) : 0 };
+    }
+
+    return {
+      tasksValidated: tasksSet.size,
+      validations: totalCount,
+      avgResponse: totalCount > 0 ? Math.floor(totalResponse / totalCount) : 0,
+      lastUpdate: lastUpdate.toString(),
+      byTag: tags
+    };
+  };
+
+  const buildAgentDashboard = (agentId) => {
+    const agent = finalState.agents?.[agentId] ?? null;
+    if (!agent) return null;
+    const perf = buildAgentPerformance(agentId);
+    const spendByPolicy = getSpendByPolicyForAgent(agentId);
+    let totalSpend = 0n;
+    for (const policyId of Object.keys(spendByPolicy)) {
+      try {
+        totalSpend += BigInt(spendByPolicy[policyId]?.total ?? "0");
+      } catch {}
+    }
+
+    const owner = agent.owner ?? null;
+    const rewardCount = owner ? (finalState.rewards ?? []).filter((r) => String(r?.recipient ?? "").toLowerCase() === String(owner).toLowerCase()).length : 0;
+
+    const linkedReceipts = [];
+    for (const receiptId of Object.keys(finalState.receipts ?? {})) {
+      const r = finalState.receipts[receiptId];
+      const links = r?.links ?? [];
+      for (const link of links) {
+        if (link?.kind === "validation" && String(link?.requestHash ?? "") && agentId) {
+          const v = finalState.validations?.[link.requestHash];
+          const events = v?.events ?? [];
+          for (const e of events) {
+            if (e?.name === "ValidationRequest" && String(e?.args?.agentId ?? "") === String(agentId)) {
+              linkedReceipts.push({ receiptId, ...link });
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    return {
+      agentId,
+      owner,
+      ownerSource: agent.ownerSource ?? null,
+      performance: perf,
+      spend: { total: totalSpend.toString(), byPolicy: spendByPolicy },
+      rewards: { count: rewardCount },
+      receipts: { linkedCount: linkedReceipts.length }
+    };
+  };
+
   const server = nodeHttp.createServer(async (req, res) => {
     const traceId = req.headers["x-trace-id"] ? String(req.headers["x-trace-id"]) : randomId();
     const u = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
@@ -1080,6 +1189,27 @@ async function main() {
       const spend = agentMockStore?.x402?.byPolicy?.[policyId] ?? null;
       logEvent({ event: "indexer.http", ok: true, traceId, method: req.method, path: p, code: 200, x402Mock: true, policyId });
       return sendJson(res, 200, { ok: true, policyId, spend });
+    }
+
+    if (req.method === "GET" && p === "/dashboard/agents") {
+      const agents = Object.keys(finalState.agents ?? {})
+        .sort((a, b) => Number(BigInt(b) - BigInt(a)))
+        .map((agentId) => buildAgentDashboard(agentId))
+        .filter(Boolean);
+      logEvent({ event: "indexer.http", ok: true, traceId, method: req.method, path: p, code: 200 });
+      return sendJson(res, 200, { ok: true, agents });
+    }
+
+    if (req.method === "GET" && p.startsWith("/dashboard/agents/")) {
+      const agentId = p.split("/").pop();
+      const dash = buildAgentDashboard(agentId);
+      if (!dash) {
+        logEvent({ event: "indexer.http", ok: false, traceId, method: req.method, path: p, code: 404 });
+        return sendJson(res, 404, { error: "not-found" });
+      }
+      const snapshot = buildReputationSnapshotFromFinalState(finalState, agentId);
+      logEvent({ event: "indexer.http", ok: true, traceId, method: req.method, path: p, code: 200 });
+      return sendJson(res, 200, { ok: true, dashboard: dash, reputation: snapshot?.reputation ?? null, reputationDigest: snapshot?.digest ?? null });
     }
 
     if (x402Mock && req.method === "GET" && p.startsWith("/receipts/")) {
@@ -1277,6 +1407,7 @@ async function main() {
       <li><a href="/rewards">/rewards</a></li>
       <li><a href="/agents">/agents</a></li>
       <li><a href="/reputation">/reputation</a></li>
+      <li><a href="/dashboard/agents">/dashboard/agents</a></li>
       <li><a href="/alerts">/alerts</a></li>
       <li><a href="/state">/state</a></li>
     </ul>
