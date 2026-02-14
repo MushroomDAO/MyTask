@@ -243,6 +243,7 @@ async function main() {
   const port = Number(getArgValue(argv, "--port") ?? process.env.INDEXER_PORT ?? "8790");
   const x402Mock = parseBool(getArgValue(argv, "--x402Mock") ?? process.env.INDEXER_X402_MOCK, false);
   const x402PoliciesJson = getArgValue(argv, "--x402PoliciesJson") ?? process.env.INDEXER_X402_POLICIES_JSON ?? null;
+  const x402RateLimitJson = getArgValue(argv, "--x402RateLimitJson") ?? process.env.INDEXER_X402_RATE_LIMIT_JSON ?? null;
   const taskEscrow = normalizeHexAddress(
     getArgValue(argv, "--taskEscrow") ?? process.env.TASK_ESCROW_ADDRESS ?? requireEnv("TASK_ESCROW_ADDRESS")
   );
@@ -811,6 +812,16 @@ async function main() {
     }
   })();
 
+  const x402RateLimit = (() => {
+    if (!x402RateLimitJson) return {};
+    try {
+      const parsed = JSON.parse(String(x402RateLimitJson));
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  })();
+
   let agentMockStore = null;
   if (agentMock || x402Mock) {
     ensureDir(path.dirname(agentMockStoreFile));
@@ -820,20 +831,79 @@ async function main() {
       requests: {},
       receiptOrder: [],
       receipts: {},
-      x402: { byPolicy: {} }
+      x402: { byPolicy: {}, rateLimit: { order: [], windows: {} } }
     });
     agentMockStore.order = Array.isArray(agentMockStore.order) ? agentMockStore.order : [];
     agentMockStore.requests = agentMockStore.requests && typeof agentMockStore.requests === "object" ? agentMockStore.requests : {};
     agentMockStore.receiptOrder = Array.isArray(agentMockStore.receiptOrder) ? agentMockStore.receiptOrder : [];
     agentMockStore.receipts = agentMockStore.receipts && typeof agentMockStore.receipts === "object" ? agentMockStore.receipts : {};
-    agentMockStore.x402 = agentMockStore.x402 && typeof agentMockStore.x402 === "object" ? agentMockStore.x402 : { byPolicy: {} };
+    agentMockStore.x402 =
+      agentMockStore.x402 && typeof agentMockStore.x402 === "object"
+        ? agentMockStore.x402
+        : { byPolicy: {}, rateLimit: { order: [], windows: {} } };
     agentMockStore.x402.byPolicy =
       agentMockStore.x402.byPolicy && typeof agentMockStore.x402.byPolicy === "object" ? agentMockStore.x402.byPolicy : {};
+    agentMockStore.x402.rateLimit =
+      agentMockStore.x402.rateLimit && typeof agentMockStore.x402.rateLimit === "object"
+        ? agentMockStore.x402.rateLimit
+        : { order: [], windows: {} };
+    agentMockStore.x402.rateLimit.order = Array.isArray(agentMockStore.x402.rateLimit.order) ? agentMockStore.x402.rateLimit.order : [];
+    agentMockStore.x402.rateLimit.windows =
+      agentMockStore.x402.rateLimit.windows && typeof agentMockStore.x402.rateLimit.windows === "object"
+        ? agentMockStore.x402.rateLimit.windows
+        : {};
   }
 
   const saveAgentMockStore = () => {
     if (!agentMockStore) return;
     writeJsonAtomic(agentMockStoreFile, agentMockStore);
+  };
+
+  const consumeRateLimit = ({ scope, key, policyId }) => {
+    if (!agentMockStore) return { ok: true };
+    const nowMs = Date.now();
+
+    const cfg =
+      (x402RateLimit?.policies && typeof x402RateLimit.policies === "object" ? x402RateLimit.policies[policyId] : null) ??
+      x402RateLimit ??
+      {};
+    const scopeCfg = cfg?.[scope];
+    if (!scopeCfg || typeof scopeCfg !== "object") return { ok: true };
+
+    const maxRaw = scopeCfg.max != null ? Number(scopeCfg.max) : null;
+    const windowSecRaw = scopeCfg.windowSec != null ? Number(scopeCfg.windowSec) : null;
+    const max = Number.isFinite(maxRaw) && maxRaw > 0 ? Math.floor(maxRaw) : null;
+    const windowSec = Number.isFinite(windowSecRaw) && windowSecRaw > 0 ? Math.floor(windowSecRaw) : null;
+    if (!max || !windowSec) return { ok: true };
+
+    const windowMs = windowSec * 1000;
+    const windowId = Math.floor(nowMs / windowMs);
+    const composite = `${scope}:${String(key ?? "")}`;
+
+    const windows = agentMockStore.x402.rateLimit.windows;
+    const existing = windows[composite];
+    const entry =
+      existing && typeof existing === "object"
+        ? existing
+        : { windowId, count: 0 };
+    if (entry.windowId !== windowId) {
+      entry.windowId = windowId;
+      entry.count = 0;
+    }
+    if (entry.count >= max) {
+      const resetAtMs = (windowId + 1) * windowMs;
+      const retryAfterSec = Math.max(1, Math.ceil((resetAtMs - nowMs) / 1000));
+      return { ok: false, retryAfterSec, max, windowSec, scope };
+    }
+    entry.count += 1;
+    windows[composite] = entry;
+    agentMockStore.x402.rateLimit.order.push(composite);
+    while (agentMockStore.x402.rateLimit.order.length > 5000) {
+      const oldKey = agentMockStore.x402.rateLimit.order.shift();
+      if (oldKey) delete windows[oldKey];
+    }
+    saveAgentMockStore();
+    return { ok: true, max, windowSec, scope };
   };
 
   const rememberAgentMockResponse = (key, entry) => {
@@ -1049,6 +1119,59 @@ async function main() {
 
       const agentId = body?.agentId != null ? String(body.agentId) : null;
       const sponsorAddress = body?.sponsorAddress != null ? String(body.sponsorAddress) : null;
+      const payerAddress = body?.payerAddress != null ? String(body.payerAddress) : null;
+      const remoteIp = req.socket?.remoteAddress ? String(req.socket.remoteAddress) : "unknown";
+
+      if (!payerAddress || !String(payerAddress).trim()) {
+        logEvent({ event: "indexer.http", ok: false, traceId, method: req.method, path: p, code: 400, error: "missing-payerAddress" });
+        return sendJson(res, 400, { error: "missing-payerAddress" });
+      }
+      if (amount <= 0n) {
+        logEvent({ event: "indexer.http", ok: false, traceId, method: req.method, path: p, code: 400, error: "amount-must-be-positive" });
+        return sendJson(res, 400, { error: "amount-must-be-positive" });
+      }
+      const urlStr = body?.url != null ? String(body.url) : "";
+      const methodStr = body?.method != null ? String(body.method) : "";
+      if (!urlStr || urlStr.length > 2048 || !methodStr || methodStr.length > 64) {
+        logEvent({ event: "indexer.http", ok: false, traceId, method: req.method, path: p, code: 400, error: "invalid-fields" });
+        return sendJson(res, 400, { error: "invalid-fields" });
+      }
+
+      const scopes = [
+        { scope: "byIp", key: remoteIp },
+        { scope: "byPayer", key: payerAddress.toLowerCase() },
+        ...(agentId ? [{ scope: "byAgent", key: agentId }] : [])
+      ];
+      for (const s of scopes) {
+        const r = consumeRateLimit({ scope: s.scope, key: s.key, policyId });
+        if (!r.ok) {
+          logEvent({
+            event: "indexer.http",
+            ok: false,
+            traceId,
+            method: req.method,
+            path: p,
+            code: 429,
+            x402Mock: true,
+            policyId,
+            agentId,
+            sponsorAddress,
+            payerAddress,
+            scope: r.scope,
+            key: s.key,
+            retryAfterSec: r.retryAfterSec
+          });
+          res.setHeader("retry-after", String(r.retryAfterSec));
+          return sendJson(res, 429, {
+            error: "rate-limited",
+            policyId,
+            scope: r.scope,
+            retryAfterSec: r.retryAfterSec,
+            max: r.max,
+            windowSec: r.windowSec
+          });
+        }
+      }
 
       const policyViolations = [];
       if (policyCfg && typeof policyCfg === "object") {
@@ -1129,11 +1252,11 @@ async function main() {
       const payload = {
         schema: "aastar.x402.receipt@v1",
         receivedAt,
-        url: body?.url ?? null,
-        method: body?.method ?? null,
+        url: urlStr,
+        method: methodStr,
         amount: amountRaw,
         currency: body?.currency ?? null,
-        payerAddress: body?.payerAddress ?? null,
+        payerAddress,
         agentId,
         chainId: body?.chainId != null ? String(body.chainId) : String(chainId),
         sponsorAddress,
@@ -1189,6 +1312,17 @@ async function main() {
       const spend = agentMockStore?.x402?.byPolicy?.[policyId] ?? null;
       logEvent({ event: "indexer.http", ok: true, traceId, method: req.method, path: p, code: 200, x402Mock: true, policyId });
       return sendJson(res, 200, { ok: true, policyId, spend });
+    }
+
+    if (x402Mock && req.method === "GET" && p === "/x402/ratelimit") {
+      const windows = agentMockStore?.x402?.rateLimit?.windows ?? {};
+      const keys = Object.keys(windows);
+      const entries = keys
+        .slice(-200)
+        .map((k) => ({ key: k, windowId: windows[k]?.windowId ?? null, count: windows[k]?.count ?? null }))
+        .filter((x) => x.count != null);
+      logEvent({ event: "indexer.http", ok: true, traceId, method: req.method, path: p, code: 200, x402Mock: true });
+      return sendJson(res, 200, { ok: true, config: x402RateLimit, size: keys.length, entries });
     }
 
     if (req.method === "GET" && p === "/dashboard/agents") {
