@@ -377,6 +377,17 @@ async function main() {
       ]
     },
     {
+      type: "event",
+      name: "ReceiptLinked",
+      anonymous: false,
+      inputs: [
+        { indexed: true, name: "taskId", type: "bytes32" },
+        { indexed: true, name: "receiptId", type: "bytes32" },
+        { indexed: false, name: "receiptUri", type: "string" },
+        { indexed: true, name: "linker", type: "address" }
+      ]
+    },
+    {
       type: "function",
       name: "getTask",
       stateMutability: "view",
@@ -503,13 +514,26 @@ async function main() {
       decoded.name === "TaskAccepted" ||
       decoded.name === "EvidenceSubmitted" ||
       decoded.name === "TaskValidated" ||
-      decoded.name === "TaskCompleted"
+      decoded.name === "TaskCompleted" ||
+      decoded.name === "ReceiptLinked"
     ) {
       const taskId = decoded.args.taskId;
       state.tasks[taskId] = state.tasks[taskId] ?? { taskId, events: [] };
       state.tasks[taskId].events.push({ name: decoded.name, blockNumber: toNumberSafe(log.blockNumber), args: decoded.args });
       if (decoded.name === "TaskValidated" && decoded.args.juryTaskHash) {
         state.tasks[taskId].juryTaskHash = decoded.args.juryTaskHash;
+      }
+      if (decoded.name === "ReceiptLinked" && decoded.args.receiptId) {
+        const receiptId = decoded.args.receiptId;
+        state.receipts[receiptId] = state.receipts[receiptId] ?? { receiptId, links: [] };
+        state.receipts[receiptId].links.push({
+          kind: "task",
+          taskId,
+          receiptUri: decoded.args.receiptUri,
+          linker: decoded.args.linker
+        });
+        state.tasks[taskId].receipts = state.tasks[taskId].receipts ?? [];
+        state.tasks[taskId].receipts.push({ receiptId, receiptUri: decoded.args.receiptUri, linker: decoded.args.linker });
       }
     }
   };

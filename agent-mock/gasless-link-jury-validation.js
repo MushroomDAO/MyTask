@@ -525,6 +525,17 @@ async function main() {
       },
       {
         type: "function",
+        name: "linkReceipt",
+        stateMutability: "nonpayable",
+        inputs: [
+          { name: "taskId", type: "bytes32" },
+          { name: "receiptId", type: "bytes32" },
+          { name: "receiptUri", type: "string" }
+        ],
+        outputs: []
+      },
+      {
+        type: "function",
         name: "assignSupplier",
         stateMutability: "nonpayable",
         inputs: [
@@ -837,7 +848,17 @@ async function main() {
           }
 
           if (receiptUri) {
-            logTaskEvent({ event: "orchestrator.receiptUriIgnored", ok: true, mode, receiptUri });
+            const receiptId = deriveReceiptId(receiptUri);
+            const linkData = encodeFunctionData({ abi: taskEscrowAbi, functionName: "linkReceipt", args: [taskId, receiptId, receiptUri] });
+            try {
+              const linkTxHash = await sendTx({ to: taskEscrow, data: linkData, wallet: walletClient });
+              entry.taskReceiptLinked = true;
+              entry.taskReceipt = { receiptId, receiptUri, txHash: linkTxHash };
+              saveState();
+              logTaskEvent({ event: "orchestrator.linkReceipt", ok: true, mode, receiptId, receiptUri, txHash: linkTxHash });
+            } catch (e) {
+              logTaskEvent({ event: "orchestrator.linkReceiptFailed", ok: false, mode, receiptId, error: String(e) });
+            }
           }
 
           const juryAbi = [
