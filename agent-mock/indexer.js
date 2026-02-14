@@ -83,7 +83,8 @@ function parseBool(v, defaultValue) {
 
 function normalizeHexAddress(v) {
   if (!v) return v;
-  return v.startsWith("0x") ? v : `0x${v}`;
+  const hex = v.startsWith("0x") ? v : `0x${v}`;
+  return hex.toLowerCase();
 }
 
 function ensureDir(p) {
@@ -286,39 +287,49 @@ async function main() {
         { indexed: true, name: "taskId", type: "bytes32" },
         { indexed: true, name: "community", type: "address" },
         { indexed: false, name: "token", type: "address" },
-        { indexed: false, name: "reward", type: "uint256" }
+        { indexed: false, name: "reward", type: "uint256" },
+        { indexed: false, name: "deadline", type: "uint256" }
       ]
     },
     {
       type: "event",
-      name: "WorkSubmitted",
+      name: "TaskAccepted",
+      anonymous: false,
+      inputs: [
+        { indexed: true, name: "taskId", type: "bytes32" },
+        { indexed: true, name: "taskor", type: "address" },
+        { indexed: false, name: "timestamp", type: "uint256" }
+      ]
+    },
+    {
+      type: "event",
+      name: "EvidenceSubmitted",
       anonymous: false,
       inputs: [
         { indexed: true, name: "taskId", type: "bytes32" },
         { indexed: false, name: "evidenceUri", type: "string" },
-        { indexed: false, name: "challengeDeadline", type: "uint256" }
+        { indexed: false, name: "timestamp", type: "uint256" }
       ]
     },
     {
       type: "event",
-      name: "TaskFinalized",
+      name: "TaskValidated",
+      anonymous: false,
+      inputs: [
+        { indexed: true, name: "taskId", type: "bytes32" },
+        { indexed: true, name: "juryTaskHash", type: "bytes32" },
+        { indexed: false, name: "finalResponse", type: "uint8" }
+      ]
+    },
+    {
+      type: "event",
+      name: "TaskCompleted",
       anonymous: false,
       inputs: [
         { indexed: true, name: "taskId", type: "bytes32" },
         { indexed: false, name: "taskorPayout", type: "uint256" },
         { indexed: false, name: "supplierPayout", type: "uint256" },
         { indexed: false, name: "juryPayout", type: "uint256" }
-      ]
-    },
-    {
-      type: "event",
-      name: "ReceiptLinked",
-      anonymous: false,
-      inputs: [
-        { indexed: true, name: "taskId", type: "bytes32" },
-        { indexed: true, name: "receiptId", type: "bytes32" },
-        { indexed: false, name: "receiptUri", type: "string" },
-        { indexed: true, name: "linker", type: "address" }
       ]
     },
     {
@@ -339,33 +350,16 @@ async function main() {
             { name: "supplierFee", type: "uint256" },
             { name: "deadline", type: "uint256" },
             { name: "createdAt", type: "uint256" },
-            { name: "challengeDeadline", type: "uint256" },
-            { name: "challengeStake", type: "uint256" },
-            { name: "status", type: "uint8" },
+            { name: "state", type: "uint8" },
             { name: "metadataUri", type: "string" },
             { name: "evidenceUri", type: "string" },
             { name: "taskType", type: "bytes32" },
+            { name: "minJurors", type: "uint256" },
             { name: "juryTaskHash", type: "bytes32" }
           ]
         }
       ]
     },
-    { type: "function", name: "getTaskReceipts", stateMutability: "view", inputs: [{ type: "bytes32" }], outputs: [{ type: "bytes32[]" }] },
-    { type: "function", name: "getTaskValidationRequests", stateMutability: "view", inputs: [{ type: "bytes32" }], outputs: [{ type: "bytes32[]" }] },
-    { type: "function", name: "getTaskRequiredValidationTags", stateMutability: "view", inputs: [{ type: "bytes32" }], outputs: [{ type: "bytes32[]" }] },
-    {
-      type: "function",
-      name: "getTaskValidationRequirement",
-      stateMutability: "view",
-      inputs: [{ type: "bytes32" }, { type: "bytes32" }],
-      outputs: [
-        { name: "minCount", type: "uint64" },
-        { name: "minAvgResponse", type: "uint8" },
-        { name: "minUniqueValidators", type: "uint8" },
-        { name: "enabled", type: "bool" }
-      ]
-    },
-    { type: "function", name: "validationsSatisfied", stateMutability: "view", inputs: [{ type: "bytes32" }], outputs: [{ type: "bool" }] }
   ];
 
   const juryAbi = [
@@ -460,19 +454,19 @@ async function main() {
   const ingestTaskEscrowLog = (log) => {
     const decoded = ingestEvent(taskEscrowAbi, log);
     if (!decoded) return;
-    if (decoded.name === "TaskCreated" || decoded.name === "WorkSubmitted" || decoded.name === "TaskFinalized") {
+    if (
+      decoded.name === "TaskCreated" ||
+      decoded.name === "TaskAccepted" ||
+      decoded.name === "EvidenceSubmitted" ||
+      decoded.name === "TaskValidated" ||
+      decoded.name === "TaskCompleted"
+    ) {
       const taskId = decoded.args.taskId;
       state.tasks[taskId] = state.tasks[taskId] ?? { taskId, events: [] };
       state.tasks[taskId].events.push({ name: decoded.name, blockNumber: toNumberSafe(log.blockNumber), args: decoded.args });
-      return;
-    }
-    if (decoded.name === "ReceiptLinked") {
-      const taskId = decoded.args.taskId;
-      const receiptId = decoded.args.receiptId;
-      state.tasks[taskId] = state.tasks[taskId] ?? { taskId, events: [] };
-      state.tasks[taskId].events.push({ name: decoded.name, blockNumber: toNumberSafe(log.blockNumber), args: decoded.args });
-      state.receipts[receiptId] = state.receipts[receiptId] ?? { receiptId, links: [] };
-      state.receipts[receiptId].links.push({ kind: "task", taskId, receiptUri: decoded.args.receiptUri, linker: decoded.args.linker });
+      if (decoded.name === "TaskValidated" && decoded.args.juryTaskHash) {
+        state.tasks[taskId].juryTaskHash = decoded.args.juryTaskHash;
+      }
     }
   };
 
@@ -537,6 +531,8 @@ async function main() {
     } catch {}
 
     const reward = {
+      txHash: log.transactionHash,
+      logIndex: toNumberSafe(log.logIndex),
       blockNumber: toNumberSafe(log.blockNumber),
       buyer: decoded.args.buyer,
       recipient: decoded.args.recipient,
@@ -576,10 +572,6 @@ async function main() {
   const taskIds = Object.keys(state.tasks);
   for (const taskId of taskIds) {
     const task = await publicClient.readContract({ address: taskEscrow, abi: taskEscrowAbi, functionName: "getTask", args: [taskId] });
-    const receipts = await publicClient.readContract({ address: taskEscrow, abi: taskEscrowAbi, functionName: "getTaskReceipts", args: [taskId] });
-    const requestHashes = await publicClient.readContract({ address: taskEscrow, abi: taskEscrowAbi, functionName: "getTaskValidationRequests", args: [taskId] });
-    const requiredTags = await publicClient.readContract({ address: taskEscrow, abi: taskEscrowAbi, functionName: "getTaskRequiredValidationTags", args: [taskId] });
-    const satisfied = await publicClient.readContract({ address: taskEscrow, abi: taskEscrowAbi, functionName: "validationsSatisfied", args: [taskId] });
 
     state.tasks[taskId].onchain = {
       community: task.community,
@@ -590,37 +582,17 @@ async function main() {
       supplierFee: task.supplierFee.toString(),
       deadline: task.deadline.toString(),
       createdAt: task.createdAt.toString(),
-      challengeDeadline: task.challengeDeadline.toString(),
-      status: Number(task.status),
+      state: Number(task.state),
       metadataUri: task.metadataUri,
       evidenceUri: task.evidenceUri,
       taskType: task.taskType,
       juryTaskHash: task.juryTaskHash,
-      receipts,
-      validationRequests: requestHashes,
-      requiredTags,
-      validationsSatisfied: satisfied
     };
 
-    const requirements = {};
-    for (const tag of requiredTags) {
-      const req = await publicClient.readContract({
-        address: taskEscrow,
-        abi: taskEscrowAbi,
-        functionName: "getTaskValidationRequirement",
-        args: [taskId, tag]
-      });
-      requirements[tag] = {
-        minCount: req[0].toString(),
-        minAvgResponse: req[1],
-        minUniqueValidators: req[2],
-        enabled: req[3]
-      };
-    }
-    state.tasks[taskId].requirements = requirements;
-
     const perTaskValidations = [];
-    for (const requestHash of requestHashes) {
+    const juryTaskHash = task.juryTaskHash && task.juryTaskHash !== "0x0000000000000000000000000000000000000000000000000000000000000000" ? task.juryTaskHash : null;
+    if (juryTaskHash) {
+      const requestHash = juryTaskHash;
       const status = await publicClient.readContract({
         address: juryContract,
         abi: juryAbi,
@@ -664,18 +636,6 @@ async function main() {
       }
     }
     state.tasks[taskId].validations = perTaskValidations;
-
-    const hasRequirements = requiredTags.length > 0 && Object.values(requirements).some((r) => r.enabled);
-    const challengeDeadline = BigInt(task.challengeDeadline);
-    if (hasRequirements && !satisfied && challengeDeadline > 0n && challengeDeadline < now) {
-      state.alerts.push({
-        kind: "validation-blocked",
-        taskId,
-        challengeDeadline: challengeDeadline.toString(),
-        requiredTags,
-        hint: "Task has unmet validation requirements after challenge deadline"
-      });
-    }
   }
 
   for (const agentId of Object.keys(state.agents)) {

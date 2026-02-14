@@ -76,7 +76,8 @@ function parseBool(v, defaultValue) {
 
 function normalizeHexAddress(v) {
   if (!v) return v;
-  return v.startsWith("0x") ? v : `0x${v}`;
+  const hex = v.startsWith("0x") ? v : `0x${v}`;
+  return hex.toLowerCase();
 }
 
 function randomId() {
@@ -209,7 +210,7 @@ async function main() {
     process.env.ENTRYPOINT_ADDRESS ??
     "0x0000000071727De22E5E9d8BAf0edAc6f37da032";
 
-  const taskEscrow = getArgValue(argv, "--taskEscrow") ?? requireEnv("TASK_ESCROW_ADDRESS");
+  const taskEscrow = normalizeHexAddress(getArgValue(argv, "--taskEscrow") ?? requireEnv("TASK_ESCROW_ADDRESS"));
 
   const publicClient = createPublicClient({
     chain: { id: chainId, name: "custom", nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 }, rpcUrls: { default: { http: [rpcUrl] } } },
@@ -262,6 +263,7 @@ async function main() {
     const autoFastForward = parseBool(getArgValue(argv, "--autoFastForward"), true);
     const requireManualFinalize = parseBool(getArgValue(argv, "--requireManualFinalize"), false);
     const scanOnStart = parseBool(getArgValue(argv, "--scanOnStart") ?? process.env.ORCH_SCAN_ON_START, true);
+    const exitAfterScan = parseBool(getArgValue(argv, "--exitAfterScan") ?? process.env.ORCH_EXIT_AFTER_SCAN, false);
     const lookbackBlocks = BigInt(getArgValue(argv, "--lookbackBlocks") ?? process.env.ORCH_LOOKBACK_BLOCKS ?? "5000");
     const stateFile =
       getArgValue(argv, "--stateFile") ??
@@ -347,8 +349,9 @@ async function main() {
       ? privateKeyToAccount(validatorPrivateKeyRaw.startsWith("0x") ? validatorPrivateKeyRaw : `0x${validatorPrivateKeyRaw}`)
       : account;
 
-    const juryContractAddress =
-      getArgValue(argv, "--juryContract") ?? process.env.JURY_CONTRACT_ADDRESS ?? requireEnv("JURY_CONTRACT_ADDRESS");
+    const juryContractAddress = normalizeHexAddress(
+      getArgValue(argv, "--juryContract") ?? process.env.JURY_CONTRACT_ADDRESS ?? requireEnv("JURY_CONTRACT_ADDRESS")
+    );
     const agentId = BigInt(getArgValue(argv, "--agentId") ?? process.env.AGENT_ID ?? "1");
 
     const validationTagRaw = getArgValue(argv, "--validationTag") ?? process.env.VALIDATION_TAG;
@@ -381,7 +384,9 @@ async function main() {
     const x402SponsorAddress = getArgValue(argv, "--x402Sponsor") ?? process.env.X402_SPONSOR_ADDRESS ?? null;
     const x402PolicyId = getArgValue(argv, "--x402PolicyId") ?? process.env.X402_POLICY_ID ?? "default";
 
-    const myShopItemsAddress = getArgValue(argv, "--myShopItems") ?? process.env.MYSHOP_ITEMS_ADDRESS ?? null;
+    const myShopItemsAddress = normalizeHexAddress(
+      getArgValue(argv, "--myShopItems") ?? process.env.MYSHOP_ITEMS_ADDRESS ?? null
+    );
     const rewardItemIdRaw = getArgValue(argv, "--rewardItemId") ?? process.env.REWARD_ITEM_ID ?? null;
     const rewardItemId = rewardItemIdRaw ? BigInt(rewardItemIdRaw) : null;
     const rewardQuantity = BigInt(getArgValue(argv, "--rewardQuantity") ?? process.env.REWARD_QUANTITY ?? "1");
@@ -431,7 +436,8 @@ async function main() {
           { indexed: true, name: "taskId", type: "bytes32" },
           { indexed: true, name: "community", type: "address" },
           { indexed: false, name: "token", type: "address" },
-          { indexed: false, name: "reward", type: "uint256" }
+          { indexed: false, name: "reward", type: "uint256" },
+          { indexed: false, name: "deadline", type: "uint256" }
         ]
       },
       {
@@ -452,12 +458,11 @@ async function main() {
               { name: "supplierFee", type: "uint256" },
               { name: "deadline", type: "uint256" },
               { name: "createdAt", type: "uint256" },
-              { name: "challengeDeadline", type: "uint256" },
-              { name: "challengeStake", type: "uint256" },
-              { name: "status", type: "uint8" },
+              { name: "state", type: "uint8" },
               { name: "metadataUri", type: "string" },
               { name: "evidenceUri", type: "string" },
               { name: "taskType", type: "bytes32" },
+              { name: "minJurors", type: "uint256" },
               { name: "juryTaskHash", type: "bytes32" }
             ]
           }
@@ -472,7 +477,7 @@ async function main() {
       },
       {
         type: "function",
-        name: "submitWork",
+        name: "submitEvidence",
         stateMutability: "nonpayable",
         inputs: [
           { name: "taskId", type: "bytes32" },
@@ -482,51 +487,31 @@ async function main() {
       },
       {
         type: "function",
-        name: "linkReceipt",
+        name: "assignSupplier",
         stateMutability: "nonpayable",
         inputs: [
           { name: "taskId", type: "bytes32" },
-          { name: "receiptId", type: "bytes32" },
-          { name: "receiptUri", type: "string" }
+          { name: "supplier", type: "address" },
+          { name: "fee", type: "uint256" }
         ],
         outputs: []
       },
       {
         type: "function",
-        name: "setTaskValidationRequirementWithValidators",
+        name: "linkJuryValidation",
         stateMutability: "nonpayable",
         inputs: [
           { name: "taskId", type: "bytes32" },
-          { name: "tag", type: "bytes32" },
-          { name: "minCount", type: "uint64" },
-          { name: "minAvgResponse", type: "uint8" },
-          { name: "minUniqueValidators", type: "uint8" }
+          { name: "juryTaskHash", type: "bytes32" }
         ],
         outputs: []
       },
       {
         type: "function",
-        name: "addTaskValidationRequest",
-        stateMutability: "nonpayable",
-        inputs: [
-          { name: "taskId", type: "bytes32" },
-          { name: "requestHash", type: "bytes32" }
-        ],
-        outputs: []
-      },
-      {
-        type: "function",
-        name: "finalizeTask",
+        name: "completeTask",
         stateMutability: "nonpayable",
         inputs: [{ name: "taskId", type: "bytes32" }],
         outputs: []
-      },
-      {
-        type: "function",
-        name: "validationsSatisfied",
-        stateMutability: "view",
-        inputs: [{ name: "taskId", type: "bytes32" }],
-        outputs: [{ type: "bool" }]
       }
     ];
 
@@ -536,13 +521,14 @@ async function main() {
       sendMode === "aa"
         ? {
             bundlerUrl: getArgValue(argv, "--bundlerUrl") ?? requireEnv("BUNDLER_URL"),
-            entryPoint:
+            entryPoint: normalizeHexAddress(
               getArgValue(argv, "--entryPoint") ??
-              process.env.ENTRYPOINT_ADDRESS ??
-              "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
-            superPaymaster: getArgValue(argv, "--paymaster") ?? requireEnv("SUPER_PAYMASTER_ADDRESS"),
-            operator: getArgValue(argv, "--operator") ?? requireEnv("OPERATOR_ADDRESS"),
-            aaAccount: getArgValue(argv, "--aaAccount") ?? requireEnv("AA_ACCOUNT_ADDRESS"),
+                process.env.ENTRYPOINT_ADDRESS ??
+                "0x0000000071727de22e5e9d8baf0edac6f37da032"
+            ),
+            superPaymaster: normalizeHexAddress(getArgValue(argv, "--paymaster") ?? requireEnv("SUPER_PAYMASTER_ADDRESS")),
+            operator: normalizeHexAddress(getArgValue(argv, "--operator") ?? requireEnv("OPERATOR_ADDRESS")),
+            aaAccount: normalizeHexAddress(getArgValue(argv, "--aaAccount") ?? requireEnv("AA_ACCOUNT_ADDRESS")),
             paymasterVerificationGas: BigInt(
               getArgValue(argv, "--paymasterVerificationGas") ?? process.env.PAYMASTER_VERIFICATION_GAS ?? "200000"
             ),
@@ -738,7 +724,7 @@ async function main() {
     };
 
     const taskCreatedEvent = taskEscrowAbi.find((x) => x?.type === "event" && x?.name === "TaskCreated");
-    const taskCreatedTopic0 = keccak256(toHex("TaskCreated(bytes32,address,address,uint256)"));
+    const taskCreatedTopic0 = keccak256(toHex("TaskCreated(bytes32,address,address,uint256,uint256)"));
     const ingestTaskCreated = (log) => {
       if (!taskCreatedEvent) return null;
       try {
@@ -774,7 +760,7 @@ async function main() {
           args: [taskId]
         });
 
-        const status = Number(task.status);
+        const status = Number(task.state);
         if (status >= 5) {
           entry.lastError = null;
           saveState();
@@ -799,9 +785,9 @@ async function main() {
         }
 
         if (shouldSubmit) {
-          const data = encodeFunctionData({ abi: taskEscrowAbi, functionName: "submitWork", args: [taskId, evidenceUri] });
+          const data = encodeFunctionData({ abi: taskEscrowAbi, functionName: "submitEvidence", args: [taskId, evidenceUri] });
           const txHash = await sendTx({ to: taskEscrow, data, wallet: walletClient });
-          logTaskEvent({ event: "orchestrator.submitWork", ok: true, mode, evidenceUri, txHash, source });
+          logTaskEvent({ event: "orchestrator.submitEvidence", ok: true, mode, evidenceUri, txHash, source });
 
           if (!receiptUri && x402ProxyUrl && BigInt(x402TaskAmount) > 0n) {
             try {
@@ -813,29 +799,7 @@ async function main() {
           }
 
           if (receiptUri) {
-            const receiptId = keccak256(toHex(receiptUri));
-            const linkReceiptData = encodeFunctionData({ abi: taskEscrowAbi, functionName: "linkReceipt", args: [taskId, receiptId, receiptUri] });
-            const linkReceiptTxHash = await sendTx({ to: taskEscrow, data: linkReceiptData, wallet: walletClient });
-            logTaskEvent({ event: "orchestrator.linkReceipt", ok: true, mode, receiptId, receiptUri, txHash: linkReceiptTxHash });
-          }
-
-          if (validationMinCount > 0n && String(task.community).toLowerCase() === communityAccount.address.toLowerCase()) {
-            const setReqData = encodeFunctionData({
-              abi: taskEscrowAbi,
-              functionName: "setTaskValidationRequirementWithValidators",
-              args: [taskId, validationTag, validationMinCount, validationMinAvg, validationMinUnique]
-            });
-            const setReqTxHash = await sendTx({ to: taskEscrow, data: setReqData, wallet: communityWalletClient });
-            logTaskEvent({
-              event: "orchestrator.setTaskValidationRequirementWithValidators",
-              ok: true,
-              mode,
-              tag: validationTag,
-              minCount: validationMinCount.toString(),
-              minAvg: validationMinAvg,
-              minUnique: validationMinUnique,
-              txHash: setReqTxHash
-            });
+            logTaskEvent({ event: "orchestrator.receiptUriIgnored", ok: true, mode, receiptUri });
           }
 
           const juryAbi = [
@@ -1036,13 +1000,7 @@ async function main() {
               }
             }
 
-            const addReqData = encodeFunctionData({ abi: taskEscrowAbi, functionName: "addTaskValidationRequest", args: [taskId, requestHash] });
-            try {
-              const addReqTxHash = await sendTx({ to: taskEscrow, data: addReqData, wallet: walletClient });
-              logEvent({ event: "orchestrator.addTaskValidationRequest", mode, taskId, requestHash, txHash: addReqTxHash });
-            } catch (e) {
-              logEvent({ event: "orchestrator.addTaskValidationRequestFailed", mode, taskId, requestHash, error: String(e) });
-            }
+            logEvent({ event: "orchestrator.validationRequestHash", mode, taskId, requestHash });
 
             if (!validationReceiptUri && x402ProxyUrl && BigInt(x402ValidationAmount) > 0n) {
               try {
@@ -1115,43 +1073,143 @@ async function main() {
           }
 
           if (autoFinalize) {
-            const refreshed = await publicClient.readContract({ address: taskEscrow, abi: taskEscrowAbi, functionName: "getTask", args: [taskId] });
-            const challengeDeadline = BigInt(refreshed.challengeDeadline);
-            const latestBlock = await publicClient.getBlock();
-            const now = BigInt(latestBlock.timestamp);
+            const juryFlowAbi = [
+              {
+                type: "function",
+                name: "submitEvidence",
+                stateMutability: "nonpayable",
+                inputs: [
+                  { name: "taskHash", type: "bytes32" },
+                  { name: "evidenceUri", type: "string" }
+                ],
+                outputs: []
+              },
+              {
+                type: "function",
+                name: "vote",
+                stateMutability: "nonpayable",
+                inputs: [
+                  { name: "taskHash", type: "bytes32" },
+                  { name: "response", type: "uint8" },
+                  { name: "reasoning", type: "string" }
+                ],
+                outputs: []
+              },
+              {
+                type: "function",
+                name: "finalizeTask",
+                stateMutability: "nonpayable",
+                inputs: [{ name: "taskHash", type: "bytes32" }],
+                outputs: []
+              },
+              {
+                type: "function",
+                name: "getTask",
+                stateMutability: "view",
+                inputs: [{ name: "taskHash", type: "bytes32" }],
+                outputs: [
+                  {
+                    type: "tuple",
+                    components: [
+                      { name: "agentId", type: "uint256" },
+                      { name: "taskHash", type: "bytes32" },
+                      { name: "evidenceUri", type: "string" },
+                      { name: "taskType", type: "uint8" },
+                      { name: "reward", type: "uint256" },
+                      { name: "deadline", type: "uint256" },
+                      { name: "status", type: "uint8" },
+                      { name: "minJurors", type: "uint256" },
+                      { name: "consensusThreshold", type: "uint256" },
+                      { name: "totalVotes", type: "uint256" },
+                      { name: "positiveVotes", type: "uint256" },
+                      { name: "finalResponse", type: "uint8" }
+                    ]
+                  }
+                ]
+              }
+            ];
 
-            if (autoFastForward && challengeDeadline > 0n && challengeDeadline > now) {
-              const delta = challengeDeadline - now + 2n;
+            try {
+              const submitEvidenceData = encodeFunctionData({
+                abi: juryFlowAbi,
+                functionName: "submitEvidence",
+                args: [requestHash, validationRequestUri]
+              });
+              const subTxHash = await sendTx({ to: juryContractAddress, data: submitEvidenceData, wallet: communityWalletClient });
+              logTaskEvent({ event: "orchestrator.jurySubmitEvidence", ok: true, mode, requestHash, txHash: subTxHash });
+            } catch (e) {
+              logTaskEvent({ event: "orchestrator.jurySubmitEvidenceFailed", ok: false, mode, requestHash, error: String(e) });
+            }
+
+            try {
+              const voteData = encodeFunctionData({
+                abi: juryFlowAbi,
+                functionName: "vote",
+                args: [requestHash, validationScore, validationResponseUri]
+              });
+              const voteTxHash = await sendTx({ to: juryContractAddress, data: voteData, wallet: validatorWalletClient });
+              logTaskEvent({ event: "orchestrator.juryVote", ok: true, mode, requestHash, score: validationScore, txHash: voteTxHash });
+            } catch (e) {
+              logTaskEvent({ event: "orchestrator.juryVoteFailed", ok: false, mode, requestHash, error: String(e) });
+            }
+
+            let juryTask = null;
+            try {
+              juryTask = await publicClient.readContract({ address: juryContractAddress, abi: juryFlowAbi, functionName: "getTask", args: [requestHash] });
+            } catch {}
+
+            if (autoFastForward && juryTask?.deadline) {
               try {
-                await rpcRequest("evm_increaseTime", [Number(delta)]);
-                await rpcRequest("evm_mine", []);
-                logTaskEvent({ event: "orchestrator.fastForward", ok: true, mode, seconds: Number(delta) });
+                const latestBlock = await publicClient.getBlock();
+                const now = BigInt(latestBlock.timestamp);
+                const deadline = BigInt(juryTask.deadline);
+                if (deadline > 0n && deadline >= now) {
+                  const delta = deadline - now + 2n;
+                  await rpcRequest("evm_increaseTime", [Number(delta)]);
+                  await rpcRequest("evm_mine", []);
+                  logTaskEvent({ event: "orchestrator.fastForward", ok: true, mode, seconds: Number(delta) });
+                }
               } catch (e) {
                 logTaskEvent({ event: "orchestrator.fastForwardFailed", ok: false, mode, error: String(e) });
               }
             }
 
-            if (requireManualFinalize) {
-              let satisfied = null;
-              try {
-                satisfied = await publicClient.readContract({ address: taskEscrow, abi: taskEscrowAbi, functionName: "validationsSatisfied", args: [taskId] });
-              } catch {}
-              logTaskEvent({ event: "orchestrator.manualFinalizeRequired", ok: true, mode, challengeDeadline: refreshed.challengeDeadline, validationsSatisfied: satisfied });
-              return;
+            try {
+              const finalizeJuryData = encodeFunctionData({ abi: juryFlowAbi, functionName: "finalizeTask", args: [requestHash] });
+              const finalizeJuryTxHash = await sendTx({ to: juryContractAddress, data: finalizeJuryData, wallet: walletClient });
+              logTaskEvent({ event: "orchestrator.juryFinalize", ok: true, mode, requestHash, txHash: finalizeJuryTxHash });
+            } catch (e) {
+              logTaskEvent({ event: "orchestrator.juryFinalizeFailed", ok: false, mode, requestHash, error: String(e) });
             }
 
-            const finalizeData = encodeFunctionData({ abi: taskEscrowAbi, functionName: "finalizeTask", args: [taskId] });
             try {
-              const finalizeTxHash = await sendTx({ to: taskEscrow, data: finalizeData, wallet: walletClient });
-              logTaskEvent({ event: "orchestrator.finalizeTask", ok: true, mode, txHash: finalizeTxHash });
+              const refreshedTask = await publicClient.readContract({ address: taskEscrow, abi: taskEscrowAbi, functionName: "getTask", args: [taskId] });
+              const refreshedStatus = Number(refreshedTask.state);
+              if (refreshedStatus === 3) {
+                const linkData = encodeFunctionData({ abi: taskEscrowAbi, functionName: "linkJuryValidation", args: [taskId, requestHash] });
+                const linkTxHash = await sendTx({ to: taskEscrow, data: linkData, wallet: walletClient });
+                logTaskEvent({ event: "orchestrator.linkJuryValidation", ok: true, mode, requestHash, txHash: linkTxHash });
+              }
             } catch (e) {
-              logTaskEvent({ event: "orchestrator.finalizeFailed", ok: false, mode, error: String(e) });
+              logTaskEvent({ event: "orchestrator.linkJuryValidationFailed", ok: false, mode, requestHash, error: String(e) });
+            }
+
+            try {
+              const refreshedTask2 = await publicClient.readContract({ address: taskEscrow, abi: taskEscrowAbi, functionName: "getTask", args: [taskId] });
+              const refreshedStatus2 = Number(refreshedTask2.state);
+              if (refreshedStatus2 === 4) {
+                const completeData = encodeFunctionData({ abi: taskEscrowAbi, functionName: "completeTask", args: [taskId] });
+                const completeTxHash = await sendTx({ to: taskEscrow, data: completeData, wallet: walletClient });
+                logTaskEvent({ event: "orchestrator.completeTask", ok: true, mode, txHash: completeTxHash });
+              }
+            } catch (e) {
+              logTaskEvent({ event: "orchestrator.completeTaskFailed", ok: false, mode, error: String(e) });
             }
           }
         }
 
         const finalTask = await publicClient.readContract({ address: taskEscrow, abi: taskEscrowAbi, functionName: "getTask", args: [taskId] });
-        const finalStatus = Number(finalTask.status);
+        const finalStatus = Number(finalTask.state);
 
         if (myShopItemsAddress && rewardItemId && entry.rewardTriggered !== true && finalStatus >= 5) {
           const myShopItemsAbi = [
@@ -1249,6 +1307,10 @@ async function main() {
         state.lastScanToBlock = latestBlock.toString();
         saveState();
         logEvent({ event: "orchestrator.startupScan", ok: true, fromBlock: fromBlock.toString(), toBlock: latestBlock.toString() });
+        if (exitAfterScan) {
+          logEvent({ event: "orchestrator.exitAfterScan", ok: true });
+          process.exit(0);
+        }
       } catch (e) {
         logEvent({ event: "orchestrator.startupScanFailed", ok: false, error: String(e) });
       }

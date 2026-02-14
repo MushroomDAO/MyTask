@@ -139,7 +139,7 @@ contract TaskEscrow is ITaskEscrow {
 
         // Generate unique task ID
         _taskCounter++;
-        taskId = keccak256(abi.encode(community, _taskCounter, block.timestamp, params.taskType));
+        taskId = keccak256(abi.encode(community, _taskCounter, params.taskType));
 
         // Transfer funds to escrow
         require(IERC20(params.token).transferFrom(community, address(this), params.reward), "Transfer failed");

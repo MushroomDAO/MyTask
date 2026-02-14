@@ -192,7 +192,7 @@ contract JuryContract is IJuryContract {
         require(params.consensusThreshold <= 10000, "Invalid threshold");
 
         _taskCounter++;
-        taskHash = keccak256(abi.encode(msg.sender, _taskCounter, block.timestamp, params.agentId));
+        taskHash = keccak256(abi.encode(msg.sender, _taskCounter, params.agentId, params.taskType));
 
         _initTask(
             taskHash,

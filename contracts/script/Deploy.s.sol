@@ -3,6 +3,7 @@ pragma solidity ^0.8.23;
 
 import "forge-std/Script.sol";
 import {JuryContract} from "../src/JuryContract.sol";
+import {MySBT} from "../src/MySBT.sol";
 import {TaskEscrow} from "../src/TaskEscrow.sol";
 import {ITaskEscrow} from "../src/interfaces/ITaskEscrow.sol";
 import {IJuryContract} from "../src/interfaces/IJuryContract.sol";
@@ -26,12 +27,18 @@ contract Deploy is Script {
             vm.envOr("PRIVATE_KEY", uint256(0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80));
 
         // Configuration
-        address mySBT = vm.envOr("MYSBT_ADDRESS", address(0x1));
+        address mySBT = vm.envOr("MYSBT_ADDRESS", address(0));
         address stakingToken = vm.envOr("STAKING_TOKEN", address(0x2));
         uint256 minJurorStake = vm.envOr("MIN_JUROR_STAKE", uint256(100 ether));
         address feeRecipient = vm.envOr("FEE_RECIPIENT", address(0x3));
 
         vm.startBroadcast(deployerPrivateKey);
+
+        if (mySBT == address(0) || mySBT.code.length == 0) {
+            MySBT sbt = new MySBT();
+            mySBT = address(sbt);
+            console.log("MySBT deployed at:", mySBT);
+        }
 
         // Deploy JuryContract
         JuryContract jury = new JuryContract(mySBT, stakingToken, minJurorStake);
@@ -78,6 +85,23 @@ contract DemoLifecycle is Script {
     bytes32 internal taskId;
     bytes32 internal juryTaskHash;
 
+    function _syncToRpcHead() internal {
+        string memory rpcUrl = vm.envOr("RPC_URL", string("http://127.0.0.1:8545"));
+        bytes memory blockJsonBytes = vm.rpc(rpcUrl, "eth_getBlockByNumber", "[\"latest\", false]");
+        string memory blockJson = string(blockJsonBytes);
+        string memory tsStr = vm.parseJsonString(blockJson, ".timestamp");
+        string memory heightStr = vm.parseJsonString(blockJson, ".number");
+        uint256 ts = vm.parseUint(tsStr);
+        uint256 height = vm.parseUint(heightStr);
+        vm.warp(ts);
+        vm.roll(height);
+    }
+
+    function _advance() internal {
+        vm.warp(vm.getBlockTimestamp() + 1);
+        vm.roll(vm.getBlockNumber() + 1);
+    }
+
     function run() external {
         uint256 deployerPrivateKey =
             vm.envOr("PRIVATE_KEY", uint256(0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80));
@@ -86,7 +110,7 @@ contract DemoLifecycle is Script {
         minStake = vm.envOr("MIN_JUROR_STAKE", uint256(100 ether));
         supplierFee = vm.envOr("SUPPLIER_FEE", uint256(150 ether));
 
-        mySBT = vm.envOr("MYSBT_ADDRESS", address(0x1));
+        mySBT = vm.envOr("MYSBT_ADDRESS", address(0));
         feeRecipient = vm.envOr("FEE_RECIPIENT", vm.addr(deployerPrivateKey));
 
         _deployAndFund(deployerPrivateKey);
@@ -106,22 +130,44 @@ contract DemoLifecycle is Script {
         address agent = vm.addr(AGENT_PK);
 
         vm.startBroadcast(deployerPrivateKey);
+        _advance();
+        if (mySBT == address(0) || mySBT.code.length == 0) {
+            MySBT sbt = new MySBT();
+            mySBT = address(sbt);
+        }
+        _advance();
+        MySBT(mySBT).mint(taskor, 1);
+        _advance();
         token = new ERC20Mock("USDC", "USDC", 18);
+        _advance();
         stakingToken = new ERC20Mock("xPNT", "xPNT", 18);
+        _advance();
         jury = new JuryContract(mySBT, address(stakingToken), minStake);
+        _advance();
         escrow = new TaskEscrow(address(jury), feeRecipient);
 
+        _advance();
         token.mint(community, reward);
+        _advance();
         stakingToken.mint(juror1, minStake);
+        _advance();
         stakingToken.mint(juror2, minStake);
+        _advance();
         stakingToken.mint(juror3, minStake);
 
+        _advance();
         payable(community).transfer(1 ether);
+        _advance();
         payable(taskor).transfer(1 ether);
+        _advance();
         payable(supplier).transfer(1 ether);
+        _advance();
         payable(juror1).transfer(1 ether);
+        _advance();
         payable(juror2).transfer(1 ether);
+        _advance();
         payable(juror3).transfer(1 ether);
+        _advance();
         payable(agent).transfer(1 ether);
 
         vm.stopBroadcast();
@@ -129,7 +175,9 @@ contract DemoLifecycle is Script {
 
     function _registerJuror(uint256 jurorPrivateKey) internal {
         vm.startBroadcast(jurorPrivateKey);
+        _advance();
         stakingToken.approve(address(jury), type(uint256).max);
+        _advance();
         jury.registerJuror(minStake);
         vm.stopBroadcast();
     }
@@ -142,22 +190,30 @@ contract DemoLifecycle is Script {
 
     function _createAndSubmitTask() internal {
         vm.startBroadcast(COMMUNITY_PK);
+        _advance();
         token.approve(address(escrow), type(uint256).max);
 
         ITaskEscrow.CreateTaskParams memory params = ITaskEscrow.CreateTaskParams({
             token: address(token),
             reward: reward,
-            deadline: block.timestamp + 7 days,
+            deadline: type(uint256).max,
             minJurors: 3,
             metadataUri: "ipfs://task-metadata",
             taskType: bytes32("SIMPLE")
         });
-        taskId = escrow.createTask(params);
+        _advance();
+        escrow.createTask(params);
         vm.stopBroadcast();
 
+        bytes32[] memory tasks = escrow.getTasksByCommunity(vm.addr(COMMUNITY_PK));
+        taskId = tasks[tasks.length - 1];
+
         vm.startBroadcast(TASKOR_PK);
+        _advance();
         escrow.acceptTask(taskId);
+        _advance();
         escrow.assignSupplier(taskId, vm.addr(SUPPLIER_PK), supplierFee);
+        _advance();
         escrow.submitEvidence(taskId, "ipfs://evidence");
         vm.stopBroadcast();
     }
@@ -169,27 +225,33 @@ contract DemoLifecycle is Script {
             taskType: IJuryContract.TaskType.CONSENSUS_REQUIRED,
             evidenceUri: "ipfs://jury-evidence",
             reward: 0,
-            deadline: block.timestamp + 7 days,
+            deadline: type(uint256).max,
             minJurors: 3,
             consensusThreshold: 6600
         });
+        _advance();
         juryTaskHash = jury.createTask(juryParams);
+        _advance();
         jury.submitEvidence(juryTaskHash, "ipfs://jury-evidence");
         vm.stopBroadcast();
 
         vm.startBroadcast(JUROR1_PK);
+        _advance();
         jury.vote(juryTaskHash, 80, "");
         vm.stopBroadcast();
 
         vm.startBroadcast(JUROR2_PK);
+        _advance();
         jury.vote(juryTaskHash, 90, "");
         vm.stopBroadcast();
 
         vm.startBroadcast(JUROR3_PK);
+        _advance();
         jury.vote(juryTaskHash, 85, "");
         vm.stopBroadcast();
 
         vm.startBroadcast(AGENT_PK);
+        _advance();
         jury.finalizeTask(juryTaskHash);
         vm.stopBroadcast();
     }
@@ -199,6 +261,7 @@ contract DemoLifecycle is Script {
         address supplier = vm.addr(SUPPLIER_PK);
 
         vm.startBroadcast(AGENT_PK);
+        _advance();
         escrow.linkJuryValidation(taskId, juryTaskHash);
 
         (uint256 taskorPayout, uint256 supplierPayout, uint256 juryPayout) = escrow.calculatePayouts(taskId);
@@ -206,6 +269,7 @@ contract DemoLifecycle is Script {
         uint256 supplierBefore = token.balanceOf(supplier);
         uint256 juryBefore = token.balanceOf(address(jury));
 
+        _advance();
         escrow.completeTask(taskId);
 
         console.log("\n=== DemoLifecycle Summary ===");
