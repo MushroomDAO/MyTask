@@ -67,6 +67,12 @@ function buildArtifactInfo(uri) {
   return { digest, canonical, payload };
 }
 
+function buildDataJsonUri(payload) {
+  const canonical = stableStringify(payload);
+  const base64 = Buffer.from(canonical, "utf8").toString("base64");
+  return `data:application/json;base64,${base64}`;
+}
+
 function jsonStringifySafe(value, space) {
   return JSON.stringify(value, (key, v) => (typeof v === "bigint" ? v.toString() : v), space);
 }
@@ -235,6 +241,7 @@ async function main() {
   const chainId = Number(getArgValue(argv, "--chainId") ?? process.env.CHAIN_ID ?? "1");
   const serve = parseBool(getArgValue(argv, "--serve") ?? process.env.INDEXER_SERVE, false);
   const port = Number(getArgValue(argv, "--port") ?? process.env.INDEXER_PORT ?? "8790");
+  const x402Mock = parseBool(getArgValue(argv, "--x402Mock") ?? process.env.INDEXER_X402_MOCK, false);
   const taskEscrow = normalizeHexAddress(
     getArgValue(argv, "--taskEscrow") ?? process.env.TASK_ESCROW_ADDRESS ?? requireEnv("TASK_ESCROW_ADDRESS")
   );
@@ -770,11 +777,13 @@ async function main() {
   if (!serve) return;
 
   let agentMockStore = null;
-  if (agentMock) {
+  if (agentMock || x402Mock) {
     ensureDir(path.dirname(agentMockStoreFile));
-    agentMockStore = readJsonRecovering(agentMockStoreFile, { version: 1, order: [], requests: {} });
+    agentMockStore = readJsonRecovering(agentMockStoreFile, { version: 1, order: [], requests: {}, receiptOrder: [], receipts: {} });
     agentMockStore.order = Array.isArray(agentMockStore.order) ? agentMockStore.order : [];
     agentMockStore.requests = agentMockStore.requests && typeof agentMockStore.requests === "object" ? agentMockStore.requests : {};
+    agentMockStore.receiptOrder = Array.isArray(agentMockStore.receiptOrder) ? agentMockStore.receiptOrder : [];
+    agentMockStore.receipts = agentMockStore.receipts && typeof agentMockStore.receipts === "object" ? agentMockStore.receipts : {};
   }
 
   const saveAgentMockStore = () => {
@@ -790,6 +799,19 @@ async function main() {
     while (agentMockStore.order.length > 1000) {
       const oldKey = agentMockStore.order.shift();
       if (oldKey) delete agentMockStore.requests[oldKey];
+    }
+    saveAgentMockStore();
+    return entry;
+  };
+
+  const rememberX402Receipt = (receiptId, entry) => {
+    if (!agentMockStore) return;
+    if (agentMockStore.receipts[receiptId]) return agentMockStore.receipts[receiptId];
+    agentMockStore.receipts[receiptId] = entry;
+    agentMockStore.receiptOrder.push(receiptId);
+    while (agentMockStore.receiptOrder.length > 1000) {
+      const oldId = agentMockStore.receiptOrder.shift();
+      if (oldId) delete agentMockStore.receipts[oldId];
     }
     saveAgentMockStore();
     return entry;
@@ -837,6 +859,68 @@ async function main() {
     const traceId = req.headers["x-trace-id"] ? String(req.headers["x-trace-id"]) : randomId();
     const u = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
     const p = u.pathname;
+
+    if (x402Mock && req.method === "POST" && p === "/pay") {
+      let bodyRaw = "";
+      try {
+        bodyRaw = await readBody(req, 64 * 1024);
+      } catch (e) {
+        logEvent({ event: "indexer.http", ok: false, traceId, method: req.method, path: p, code: 413, error: String(e) });
+        return sendJson(res, 413, { error: "body-too-large" });
+      }
+
+      let body = null;
+      try {
+        body = bodyRaw ? JSON.parse(bodyRaw) : {};
+      } catch {
+        logEvent({ event: "indexer.http", ok: false, traceId, method: req.method, path: p, code: 400 });
+        return sendJson(res, 400, { error: "invalid-json" });
+      }
+
+      const receivedAt = new Date().toISOString();
+      const payload = {
+        schema: "aastar.x402.receipt@v1",
+        receivedAt,
+        url: body?.url ?? null,
+        method: body?.method ?? null,
+        amount: body?.amount != null ? String(body.amount) : null,
+        currency: body?.currency ?? null,
+        payerAddress: body?.payerAddress ?? null,
+        agentId: body?.agentId != null ? String(body.agentId) : null,
+        chainId: body?.chainId != null ? String(body.chainId) : String(chainId),
+        sponsorAddress: body?.sponsorAddress ?? null,
+        policyId: body?.policyId ?? null,
+        metadata: body?.metadata ?? null,
+        status: "paid"
+      };
+
+      const canonical = stableStringify(payload);
+      const digest = keccak256(toHex(canonical));
+      const receiptId = digest;
+      const receiptUri = buildDataJsonUri(payload);
+
+      rememberX402Receipt(receiptId, { receivedAt, receiptId, digest, canonical, payload, receiptUri });
+      logEvent({ event: "indexer.http", ok: true, traceId, method: req.method, path: p, code: 200, x402Mock: true, receiptId });
+      return sendJson(res, 200, { ok: true, receiptId, receiptUri, digest });
+    }
+
+    if (x402Mock && req.method === "GET" && p.startsWith("/receipts/")) {
+      const receiptId = p.split("/").pop();
+      const entry = agentMockStore?.receipts?.[receiptId] ?? null;
+      if (!entry) {
+        logEvent({ event: "indexer.http", ok: false, traceId, method: req.method, path: p, code: 404 });
+        return sendJson(res, 404, { error: "not-found" });
+      }
+      logEvent({ event: "indexer.http", ok: true, traceId, method: req.method, path: p, code: 200, x402Mock: true, receiptId });
+      return sendJson(res, 200, { ok: true, receipt: entry });
+    }
+
+    if (x402Mock && req.method === "GET" && p === "/receipts") {
+      const ids = Array.isArray(agentMockStore?.receiptOrder) ? agentMockStore.receiptOrder.slice().reverse() : [];
+      const receipts = ids.slice(0, 200).map((id) => agentMockStore.receipts[id]).filter(Boolean);
+      logEvent({ event: "indexer.http", ok: true, traceId, method: req.method, path: p, code: 200, x402Mock: true });
+      return sendJson(res, 200, { ok: true, count: receipts.length, receipts });
+    }
 
     if (agentMock && req.method === "POST" && p.startsWith("/agent/")) {
       let bodyRaw = "";
