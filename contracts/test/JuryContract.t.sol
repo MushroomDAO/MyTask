@@ -416,17 +416,23 @@ contract JuryContractTest is Test {
     }
 
     function test_ValidationRequestCreatesTaskAndAssignsToValidator() public {
+        bytes32 taskId = keccak256("task-id");
+        bytes32 tag = bytes32("QUALITY");
+        string memory requestUri = "ipfs://request";
+        bytes32 requestHash = jury.deriveValidationRequestHash(taskId, AGENT_ID, address(jury), tag, requestUri);
+
         vm.prank(taskCreator);
-        jury.validationRequest(address(jury), AGENT_ID, "ipfs://request", bytes32(0));
+        jury.validationRequest(address(jury), AGENT_ID, requestUri, requestHash);
 
         bytes32[] memory requests = jury.getValidatorRequests(address(jury));
         assertEq(requests.length, 1);
 
-        bytes32 requestHash = requests[0];
+        bytes32 storedRequestHash = requests[0];
         IJuryContract.Task memory task = jury.getTask(requestHash);
         assertEq(task.agentId, AGENT_ID);
-        assertEq(task.evidenceUri, "ipfs://request");
+        assertEq(task.evidenceUri, requestUri);
         assertEq(uint8(task.status), uint8(IJuryContract.TaskStatus.PENDING));
+        assertEq(storedRequestHash, requestHash);
     }
 
     function test_ValidationRequestRejectsUnsupportedValidator() public {
@@ -436,22 +442,32 @@ contract JuryContractTest is Test {
     }
 
     function test_ValidationRequestRejectsInvalidAgentId() public {
+        bytes32 taskId = keccak256("task-id");
+        bytes32 tag = bytes32("QUALITY");
+        string memory requestUri = "ipfs://request";
+        bytes32 requestHash = jury.deriveValidationRequestHash(taskId, 999, address(jury), tag, requestUri);
+
         vm.prank(taskCreator);
         vm.expectRevert("Invalid agentId");
-        jury.validationRequest(address(jury), 999, "ipfs://request", bytes32(0));
+        jury.validationRequest(address(jury), 999, requestUri, requestHash);
     }
 
     function test_ValidationRequestRequiresRoleWhenEnabled() public {
         jury.setRequireValidationRequesterRole(true);
 
+        bytes32 taskId = keccak256("task-id");
+        bytes32 tag = bytes32("QUALITY");
+        string memory requestUri = "ipfs://request";
+        bytes32 requestHash = jury.deriveValidationRequestHash(taskId, AGENT_ID, address(jury), tag, requestUri);
+
         vm.prank(taskCreator);
         vm.expectRevert("Missing role");
-        jury.validationRequest(address(jury), AGENT_ID, "ipfs://request", bytes32(0));
+        jury.validationRequest(address(jury), AGENT_ID, requestUri, requestHash);
 
         jury.grantRole(jury.ROLE_VALIDATION_REQUESTER(), taskCreator);
 
         vm.prank(taskCreator);
-        jury.validationRequest(address(jury), AGENT_ID, "ipfs://request", bytes32(0));
+        jury.validationRequest(address(jury), AGENT_ID, requestUri, requestHash);
 
         bytes32[] memory requests = jury.getValidatorRequests(address(jury));
         assertEq(requests.length, 1);

@@ -133,6 +133,7 @@ contract JuryContract is IJuryContract {
         stakingToken = _stakingToken;
         minJurorStake = _minStake;
         admin = msg.sender;
+        requireNonZeroValidationRequestHash = true;
     }
 
     modifier onlyAdmin() {

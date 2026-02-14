@@ -102,6 +102,13 @@ flowchart TB
 - **Task orchestrator demo (structured logs)**: `agent-mock/gasless-link-jury-validation.js --mode orchestrateTasks` (logs include `ts` + `event`)
 - **Foundry invariants (TaskEscrowV2)**: `contracts/test/TaskEscrowV2.invariant.t.sol`
 
+## New Features (2026-02-14)
+
+- **M5 reward trigger via EOA payer**: `orchestrateTasks` now uses an EOA payer (no AA assets needed yet) and persists the reward tx into indexer state.
+- **TaskId mismatch prevention**: demo/deploy flows derive the on-chain `taskId` via `getTasksByCommunity`.
+- **Owner-bound validations**: `enforceAgentOwner` is back on by default by deploying/pointing to a real `MySBT`.
+- **ERC-8004 determinism locked**: `requestHash != 0` enforcement enabled by default, plus an end-to-end demo path in `Deploy.s.sol`.
+
 ## Agent Interaction Flow
 
 ```mermaid
@@ -284,6 +291,13 @@ MIT License - Open source and permissionless.
   - 信誉快照：`GET /reputation/:agentId` 返回 `{ reputation, canonical, digest }`，便于跨环境校验
 - **任务编排 Demo（结构化日志）**：`agent-mock/gasless-link-jury-validation.js --mode orchestrateTasks`（日志包含 `ts` + `event`）
 - **Foundry Invariant 测试（TaskEscrowV2）**：`contracts/test/TaskEscrowV2.invariant.t.sol`
+
+## 新增特性（2026-02-14）
+
+- **M5 奖励触发走 EOA 付款**：`orchestrateTasks` 使用 EOA payer（暂不依赖 AA 账户资产），并将奖励交易写入 indexer state。
+- **修复 taskId 不匹配**：demo/deploy 流通过 `getTasksByCommunity` 推导链上真实 `taskId`。
+- **验证严格绑定 owner**：默认部署/指向真实 `MySBT`，并恢复开启 `enforceAgentOwner`。
+- **锁定 ERC-8004 确定性**：默认开启 `requestHash != 0` 强制校验，并在 `Deploy.s.sol` 里提供端到端演示路径。
 
 ## 架构概览
 

@@ -1,6 +1,6 @@
 # MyTask Product Roadmap + PRD + Technical Design (Onchain Tasks + Agent Economics)
 
-Last updated: 2026-02-13
+Last updated: 2026-02-14
 
 ## 0) What I reviewed in `docs/` (inputs to this doc)
 
@@ -218,6 +218,10 @@ Missing for a complete “agent economy” product:
 
 - End-to-end demo script exists and can run on anvil.
 - Tests pass for TaskEscrow, JuryContract, and lifecycle integration.
+- Deployment flow derives the actual on-chain `taskId` (prevents taskId mismatch).
+- MySBT-backed `enforceAgentOwner` is enabled (validations are strictly owner-bound).
+- ERC-8004 determinism is locked by requiring `requestHash != 0` (end-to-end demo + tests).
+- M5 reward trigger is wired in `orchestrateTasks` using an EOA payer and shows up in indexer state.
 
 ### Milestone 1: “ERC-8004-first agent reputation”
 

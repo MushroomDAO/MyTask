@@ -42,6 +42,7 @@ contract Deploy is Script {
 
         // Deploy JuryContract
         JuryContract jury = new JuryContract(mySBT, stakingToken, minJurorStake);
+        jury.setRequireNonZeroValidationRequestHash(true);
         console.log("JuryContract deployed at:", address(jury));
 
         // Deploy TaskEscrow
@@ -117,6 +118,7 @@ contract DemoLifecycle is Script {
         _registerJurors();
         _createAndSubmitTask();
         _createAndCompleteJuryTask();
+        _erc8004ValidationDemo();
         _linkAndSettle();
     }
 
@@ -143,6 +145,8 @@ contract DemoLifecycle is Script {
         stakingToken = new ERC20Mock("xPNT", "xPNT", 18);
         _advance();
         jury = new JuryContract(mySBT, address(stakingToken), minStake);
+        _advance();
+        jury.setRequireNonZeroValidationRequestHash(true);
         _advance();
         escrow = new TaskEscrow(address(jury), feeRecipient);
 
@@ -254,6 +258,32 @@ contract DemoLifecycle is Script {
         _advance();
         jury.finalizeTask(juryTaskHash);
         vm.stopBroadcast();
+    }
+
+    function _erc8004ValidationDemo() internal {
+        bytes32 tag = bytes32("QUALITY");
+        string memory requestUri = "ipfs://erc8004-validation-request";
+        bytes32 requestHash = jury.deriveValidationRequestHash(taskId, 1, address(jury), tag, requestUri);
+
+        vm.startBroadcast(TASKOR_PK);
+        _advance();
+        jury.validationRequest(address(jury), 1, requestUri, requestHash);
+        vm.stopBroadcast();
+
+        vm.startBroadcast(JUROR1_PK);
+        _advance();
+        jury.validationResponse(requestHash, 100, "ipfs://erc8004-validation-response", bytes32(0), tag);
+        vm.stopBroadcast();
+
+        (address validator, uint256 agentId, uint8 response, bytes32 statusTag,) = jury.getValidationStatus(requestHash);
+        console.log("\n=== ERC-8004 Validation Demo ===");
+        console.log("requestHash:");
+        console.logBytes32(requestHash);
+        console.log("validator:", validator);
+        console.log("agentId:", agentId);
+        console.log("response:", response);
+        console.log("tag:");
+        console.logBytes32(statusTag);
     }
 
     function _linkAndSettle() internal {
