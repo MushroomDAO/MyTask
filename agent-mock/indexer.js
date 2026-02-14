@@ -30,6 +30,10 @@ function stableStringify(v) {
   return "null";
 }
 
+function jsonStringifySafe(value, space) {
+  return JSON.stringify(value, (key, v) => (typeof v === "bigint" ? v.toString() : v), space);
+}
+
 function buildReputationSnapshotFromFinalState(finalState, agentId) {
   const agentKey = String(agentId);
   const agent = finalState.agents?.[agentKey];
@@ -144,7 +148,7 @@ function writeJsonAtomic(filePath, obj) {
 }
 
 function sendJson(res, code, obj) {
-  const body = JSON.stringify(obj);
+  const body = jsonStringifySafe(obj);
   res.writeHead(code, { "content-type": "application/json", "content-length": Buffer.byteLength(body) });
   res.end(body);
 }
@@ -735,17 +739,17 @@ async function main() {
     }
   } catch {}
 
-  const bytes = toHex(JSON.stringify(state, null, 2));
+  const bytes = toHex(jsonStringifySafe(state, 2));
   const digest = keccak256(bytes);
   const finalState = { digest, ...state };
-  atomicWriteFile(outFile, JSON.stringify(finalState, null, 2));
+  atomicWriteFile(outFile, jsonStringifySafe(finalState, 2));
   if (writeReputationSnapshots) {
     ensureDir(reputationOutDir);
     for (const agentId of Object.keys(finalState.agents ?? {})) {
       const snapshot = buildReputationSnapshotFromFinalState(finalState, agentId);
       if (!snapshot) continue;
       const filePath = path.join(reputationOutDir, `reputation-${agentId}.json`);
-      atomicWriteFile(filePath, JSON.stringify(snapshot, null, 2));
+      atomicWriteFile(filePath, jsonStringifySafe(snapshot, 2));
     }
   }
   if (toBlock >= 0n) {

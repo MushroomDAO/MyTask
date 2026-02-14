@@ -167,6 +167,28 @@ async function bundlerRpc(url, method, params) {
   return json.result;
 }
 
+async function rpcJson(url, method, params) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params })
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`RPC HTTP ${res.status}: ${JSON.stringify(json)}`);
+  if (json.error) throw new Error(`RPC error: ${JSON.stringify(json.error)}`);
+  return json.result;
+}
+
+async function detectChainIdFromRpc(rpcUrl, fallback) {
+  try {
+    const v = await rpcJson(rpcUrl, "eth_chainId", []);
+    if (typeof v !== "string") return fallback;
+    return Number.parseInt(v, 16);
+  } catch {
+    return fallback;
+  }
+}
+
 async function main() {
   const argv = process.argv.slice(2);
 
@@ -176,7 +198,7 @@ async function main() {
 
   const rpcUrl = getArgValue(argv, "--rpcUrl") ?? requireEnv("RPC_URL");
 
-  const chainId = Number(getArgValue(argv, "--chainId") ?? process.env.CHAIN_ID ?? "1");
+  const chainId = Number(getArgValue(argv, "--chainId") ?? process.env.CHAIN_ID ?? (await detectChainIdFromRpc(rpcUrl, 1)));
 
   const runId = getArgValue(argv, "--runId") ?? process.env.RUN_ID ?? randomId();
   LOG_FILE = getArgValue(argv, "--logFile") ?? process.env.ORCHESTRATOR_LOG_FILE ?? null;
@@ -308,7 +330,10 @@ async function main() {
       "ipfs://evidence";
     let receiptUri = getArgValue(argv, "--receiptUri") ?? process.env.RECEIPT_URI;
 
-    const privateKeyRaw = getArgValue(argv, "--privateKey") ?? requireEnv("PRIVATE_KEY");
+    const privateKeyRaw =
+      getArgValue(argv, "--privateKey") ??
+      process.env.PRIVATE_KEY ??
+      (dryRun ? `0x${"1".padStart(64, "0")}` : requireEnv("PRIVATE_KEY"));
     const privateKey = privateKeyRaw.startsWith("0x") ? privateKeyRaw : `0x${privateKeyRaw}`;
     const account = privateKeyToAccount(privateKey);
 
@@ -505,14 +530,130 @@ async function main() {
       }
     ];
 
+    const sendMode = getArgValue(argv, "--sendMode") ?? process.env.SEND_MODE ?? "eoa";
+
+    const aaConfig =
+      sendMode === "aa"
+        ? {
+            bundlerUrl: getArgValue(argv, "--bundlerUrl") ?? requireEnv("BUNDLER_URL"),
+            entryPoint:
+              getArgValue(argv, "--entryPoint") ??
+              process.env.ENTRYPOINT_ADDRESS ??
+              "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
+            superPaymaster: getArgValue(argv, "--paymaster") ?? requireEnv("SUPER_PAYMASTER_ADDRESS"),
+            operator: getArgValue(argv, "--operator") ?? requireEnv("OPERATOR_ADDRESS"),
+            aaAccount: getArgValue(argv, "--aaAccount") ?? requireEnv("AA_ACCOUNT_ADDRESS"),
+            paymasterVerificationGas: BigInt(
+              getArgValue(argv, "--paymasterVerificationGas") ?? process.env.PAYMASTER_VERIFICATION_GAS ?? "200000"
+            ),
+            paymasterPostOpGas: BigInt(getArgValue(argv, "--paymasterPostOpGas") ?? process.env.PAYMASTER_POSTOP_GAS ?? "50000"),
+            verificationGasLimit: BigInt(getArgValue(argv, "--verificationGasLimit") ?? process.env.VERIFICATION_GAS_LIMIT ?? "150000"),
+            callGasLimit: BigInt(getArgValue(argv, "--callGasLimit") ?? process.env.CALL_GAS_LIMIT ?? "200000"),
+            preVerificationGas: BigInt(getArgValue(argv, "--preVerificationGas") ?? process.env.PRE_VERIFICATION_GAS ?? "40000"),
+            maxPriorityFeePerGas: BigInt(getArgValue(argv, "--maxPriorityFeePerGas") ?? process.env.MAX_PRIORITY_FEE_PER_GAS ?? "2000000000"),
+            maxFeePerGas: BigInt(getArgValue(argv, "--maxFeePerGas") ?? process.env.MAX_FEE_PER_GAS ?? "2000000000")
+          }
+        : null;
+
+    const aaAbi = [
+      { type: "function", name: "getNonce", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
+      {
+        type: "function",
+        name: "execute",
+        stateMutability: "nonpayable",
+        inputs: [{ type: "address" }, { type: "uint256" }, { type: "bytes" }],
+        outputs: []
+      }
+    ];
+
+    const entryPointAbi = [
+      {
+        type: "function",
+        name: "getUserOpHash",
+        stateMutability: "view",
+        inputs: [
+          {
+            type: "tuple",
+            components: [
+              { name: "sender", type: "address" },
+              { name: "nonce", type: "uint256" },
+              { name: "initCode", type: "bytes" },
+              { name: "callData", type: "bytes" },
+              { name: "accountGasLimits", type: "bytes32" },
+              { name: "preVerificationGas", type: "uint256" },
+              { name: "gasFees", type: "bytes32" },
+              { name: "paymasterAndData", type: "bytes" },
+              { name: "signature", type: "bytes" }
+            ]
+          }
+        ],
+        outputs: [{ type: "bytes32" }]
+      }
+    ];
+
+    const buildUserOp = async ({ to, data, value }) => {
+      if (!aaConfig) throw new Error("aaConfig-missing");
+      const nonce = await publicClient.readContract({ address: aaConfig.aaAccount, abi: aaAbi, functionName: "getNonce" });
+      const callData = encodeFunctionData({ abi: aaAbi, functionName: "execute", args: [to, value ?? 0n, data] });
+      const accountGasLimits = concat([
+        pad(`0x${aaConfig.verificationGasLimit.toString(16)}`, { dir: "left", size: 16 }),
+        pad(`0x${aaConfig.callGasLimit.toString(16)}`, { dir: "left", size: 16 })
+      ]);
+      const gasFees = concat([
+        pad(`0x${aaConfig.maxPriorityFeePerGas.toString(16)}`, { dir: "left", size: 16 }),
+        pad(`0x${aaConfig.maxFeePerGas.toString(16)}`, { dir: "left", size: 16 })
+      ]);
+      const paymasterAndData = concat([
+        aaConfig.superPaymaster,
+        pad(`0x${aaConfig.paymasterVerificationGas.toString(16)}`, { dir: "left", size: 16 }),
+        pad(`0x${aaConfig.paymasterPostOpGas.toString(16)}`, { dir: "left", size: 16 }),
+        aaConfig.operator
+      ]);
+      const userOp = {
+        sender: aaConfig.aaAccount,
+        nonce,
+        initCode: "0x",
+        callData,
+        accountGasLimits,
+        preVerificationGas: aaConfig.preVerificationGas,
+        gasFees,
+        paymasterAndData,
+        signature: "0x"
+      };
+      const userOpHash = await publicClient.readContract({
+        address: aaConfig.entryPoint,
+        abi: entryPointAbi,
+        functionName: "getUserOpHash",
+        args: [userOp]
+      });
+      userOp.signature = await account.signMessage({ message: { raw: userOpHash } });
+      return { userOp, userOpHash, entryPoint: aaConfig.entryPoint };
+    };
+
+    const sendUserOp = async ({ to, data, value }) => {
+      if (!aaConfig) throw new Error("aaConfig-missing");
+      const { userOp, entryPoint } = await buildUserOp({ to, data, value });
+      const sentHash = await bundlerRpc(aaConfig.bundlerUrl, "eth_sendUserOperation", [userOp, entryPoint]);
+      for (let i = 0; i < 30; i++) {
+        const receipt = await bundlerRpc(aaConfig.bundlerUrl, "eth_getUserOperationReceipt", [sentHash]).catch(() => null);
+        if (receipt) return { userOpHash: sentHash, receipt };
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      return { userOpHash: sentHash, receipt: null };
+    };
+
     const sendTx = async ({ to, data, wallet }) => {
-      const from = wallet.account.address;
+      const from = aaConfig ? aaConfig.aaAccount : wallet.account.address;
       if (dryRun) {
-        logEvent({ event: "orchestrator.dryRunTx", mode, to, from, data });
+        logEvent({ event: aaConfig ? "orchestrator.dryRunUserOp" : "orchestrator.dryRunTx", mode, sendMode, to, from, data });
         return null;
       }
       return await withRetries(
         async () => {
+          if (aaConfig) {
+            const out = await sendUserOp({ to, data, value: 0n });
+            return out.userOpHash;
+          }
           const hash = await wallet.sendTransaction({ to, data, value: 0n });
           await publicClient.waitForTransactionReceipt({ hash });
           return hash;
@@ -522,13 +663,25 @@ async function main() {
     };
 
     const sendTxWithValue = async ({ to, data, wallet, value }) => {
-      const from = wallet.account.address;
+      const from = aaConfig ? aaConfig.aaAccount : wallet.account.address;
       if (dryRun) {
-        logEvent({ event: "orchestrator.dryRunTx", mode, to, from, data, value: value?.toString?.() ?? String(value) });
+        logEvent({
+          event: aaConfig ? "orchestrator.dryRunUserOp" : "orchestrator.dryRunTx",
+          mode,
+          sendMode,
+          to,
+          from,
+          data,
+          value: value?.toString?.() ?? String(value)
+        });
         return null;
       }
       return await withRetries(
         async () => {
+          if (aaConfig) {
+            const out = await sendUserOp({ to, data, value: value ?? 0n });
+            return out.userOpHash;
+          }
           const hash = await wallet.sendTransaction({ to, data, value: value ?? 0n });
           await publicClient.waitForTransactionReceipt({ hash });
           return hash;
@@ -1134,7 +1287,10 @@ async function main() {
   }
 
   const bundlerUrl = getArgValue(argv, "--bundlerUrl") ?? requireEnv("BUNDLER_URL");
-  const privateKeyRaw = getArgValue(argv, "--privateKey") ?? requireEnv("PRIVATE_KEY");
+  const privateKeyRaw =
+    getArgValue(argv, "--privateKey") ??
+    process.env.PRIVATE_KEY ??
+    (dryRun ? `0x${"1".padStart(64, "0")}` : requireEnv("PRIVATE_KEY"));
   const privateKey = privateKeyRaw.startsWith("0x") ? privateKeyRaw : `0x${privateKeyRaw}`;
   const superPaymaster = getArgValue(argv, "--paymaster") ?? requireEnv("SUPER_PAYMASTER_ADDRESS");
   const operator = getArgValue(argv, "--operator") ?? requireEnv("OPERATOR_ADDRESS");
