@@ -83,6 +83,32 @@ contract JuryContractTest is Test {
         assertEq(stake, MIN_STAKE);
     }
 
+    function test_Paused_BlocksStateChanges() public {
+        jury.setPaused(true);
+
+        vm.prank(juror1);
+        vm.expectRevert(bytes("Paused"));
+        jury.registerJuror(MIN_STAKE);
+
+        IJuryContract.TaskParams memory params = IJuryContract.TaskParams({
+            agentId: AGENT_ID,
+            taskType: IJuryContract.TaskType.CONSENSUS_REQUIRED,
+            evidenceUri: "ipfs://QmEvidence",
+            reward: 1 ether,
+            deadline: block.timestamp + 7 days,
+            minJurors: 3,
+            consensusThreshold: 6600
+        });
+
+        vm.prank(taskCreator);
+        vm.expectRevert(bytes("Paused"));
+        jury.createTask(params);
+
+        vm.prank(taskCreator);
+        vm.expectRevert(bytes("Paused"));
+        jury.validationRequest(address(jury), AGENT_ID, "ipfs://req", keccak256("req"));
+    }
+
     function test_JurorRegistrationFailsWithLowStake() public {
         vm.prank(juror1);
         vm.expectRevert("Stake too low");

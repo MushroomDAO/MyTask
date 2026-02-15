@@ -123,4 +123,14 @@ contract TaskEscrowV2InvariantTest is StdInvariant, Test {
             }
         }
     }
+
+    function invariant_escrowTokenBalanceEqualsSumRewards() public view {
+        bytes32[] memory taskIds = handler.getTasks();
+        uint256 sumRewards = 0;
+        for (uint256 t = 0; t < taskIds.length; t++) {
+            TaskEscrowV2.Task memory task = escrow.getTask(taskIds[t]);
+            sumRewards += task.reward;
+        }
+        assertEq(token.balanceOf(address(escrow)), sumRewards);
+    }
 }

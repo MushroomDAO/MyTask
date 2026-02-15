@@ -55,6 +55,7 @@ contract JuryContract is IJuryContract {
     bool public requireJurorRole;
     bool public requireValidationRequesterRole;
     bool public requireNonZeroValidationRequestHash;
+    bool public paused;
 
     // ====================================
     // Mappings
@@ -112,6 +113,7 @@ contract JuryContract is IJuryContract {
     );
 
     event AdminUpdated(address indexed oldAdmin, address indexed newAdmin);
+    event Paused(bool paused);
     event RoleGranted(bytes32 indexed role, address indexed account);
     event RoleRevoked(bytes32 indexed role, address indexed account);
     event TagRoleSet(bytes32 indexed tag, bytes32 indexed role);
@@ -142,10 +144,20 @@ contract JuryContract is IJuryContract {
         _;
     }
 
+    modifier notPaused() {
+        require(!paused, "Paused");
+        _;
+    }
+
     function setAdmin(address newAdmin) external onlyAdmin {
         require(newAdmin != address(0), "Invalid admin");
         emit AdminUpdated(admin, newAdmin);
         admin = newAdmin;
+    }
+
+    function setPaused(bool paused_) external onlyAdmin {
+        paused = paused_;
+        emit Paused(paused_);
     }
 
     function setRequireJurorRole(bool enabled) external onlyAdmin {
@@ -188,7 +200,7 @@ contract JuryContract is IJuryContract {
     // ====================================
 
     /// @inheritdoc IJuryContract
-    function createTask(TaskParams calldata params) external payable returns (bytes32 taskHash) {
+    function createTask(TaskParams calldata params) external payable notPaused returns (bytes32 taskHash) {
         require(params.deadline > block.timestamp, "Invalid deadline");
         require(params.minJurors > 0, "Min jurors must be > 0");
         require(params.consensusThreshold <= 10000, "Invalid threshold");
@@ -249,7 +261,7 @@ contract JuryContract is IJuryContract {
     }
 
     /// @inheritdoc IJuryContract
-    function submitEvidence(bytes32 taskHash, string calldata evidenceUri) external {
+    function submitEvidence(bytes32 taskHash, string calldata evidenceUri) external notPaused {
         Task storage task = _tasks[taskHash];
         require(task.taskHash != bytes32(0), "Task not found");
         require(_taskCreators[taskHash] == msg.sender, "Not task creator");
@@ -264,7 +276,7 @@ contract JuryContract is IJuryContract {
     }
 
     /// @inheritdoc IJuryContract
-    function vote(bytes32 taskHash, uint8 response, string calldata reasoning) external {
+    function vote(bytes32 taskHash, uint8 response, string calldata reasoning) external notPaused {
         require(_jurorActive[msg.sender], "Not an active juror");
         require(!_hasVoted[taskHash][msg.sender], "Already voted");
 
@@ -298,7 +310,7 @@ contract JuryContract is IJuryContract {
     }
 
     /// @inheritdoc IJuryContract
-    function finalizeTask(bytes32 taskHash) external {
+    function finalizeTask(bytes32 taskHash) external notPaused {
         Task storage task = _tasks[taskHash];
         require(task.taskHash != bytes32(0), "Task not found");
         require(task.status == TaskStatus.IN_PROGRESS, "Task not in progress");
@@ -337,7 +349,7 @@ contract JuryContract is IJuryContract {
     }
 
     /// @inheritdoc IJuryContract
-    function cancelTask(bytes32 taskHash) external {
+    function cancelTask(bytes32 taskHash) external notPaused {
         Task storage task = _tasks[taskHash];
         require(task.taskHash != bytes32(0), "Task not found");
         require(_taskCreators[taskHash] == msg.sender, "Not task creator");
@@ -352,7 +364,7 @@ contract JuryContract is IJuryContract {
     // ====================================
 
     /// @inheritdoc IJuryContract
-    function registerJuror(uint256 stakeAmount) external {
+    function registerJuror(uint256 stakeAmount) external notPaused {
         require(stakeAmount >= minJurorStake, "Stake too low");
         require(!_jurorActive[msg.sender], "Already registered");
         if (requireJurorRole) {
@@ -369,7 +381,7 @@ contract JuryContract is IJuryContract {
     }
 
     /// @inheritdoc IJuryContract
-    function unregisterJuror() external {
+    function unregisterJuror() external notPaused {
         require(_jurorActive[msg.sender], "Not a juror");
 
         if (_jurorUnregisterTime[msg.sender] == 0) {
@@ -444,7 +456,7 @@ contract JuryContract is IJuryContract {
         uint256 agentId,
         string calldata requestUri,
         bytes32 requestHash
-    ) external {
+    ) external notPaused {
         require(validatorAddress == address(this), "Unsupported validator");
         if (requireValidationRequesterRole) {
             require(_roles[ROLE_VALIDATION_REQUESTER][msg.sender], "Missing role");
@@ -494,7 +506,7 @@ contract JuryContract is IJuryContract {
         string calldata responseUri,
         bytes32, /* responseHash */
         bytes32 tag
-    ) external {
+    ) external notPaused {
         require(_jurorActive[msg.sender], "Not an active juror");
         require(response <= 100, "Invalid response score");
         Task storage task = _tasks[requestHash];
@@ -581,7 +593,10 @@ contract JuryContract is IJuryContract {
         return false;
     }
 
-    function linkReceiptToValidation(bytes32 requestHash, bytes32 receiptId, string calldata receiptUri) external {
+    function linkReceiptToValidation(bytes32 requestHash, bytes32 receiptId, string calldata receiptUri)
+        external
+        notPaused
+    {
         require(_taskCreators[requestHash] == msg.sender, "Not task creator");
         require(receiptId != bytes32(0), "Invalid receipt");
 

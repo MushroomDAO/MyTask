@@ -111,6 +111,7 @@ contract TaskEscrowV2 {
     error InvalidNonce();
     error ReentrancyDetected();
     error TransferFailed();
+    error NotOwner();
     error ZeroAddress();
     error ZeroAmount();
     error InvalidDeadline();
@@ -119,6 +120,8 @@ contract TaskEscrowV2 {
     error InvalidRequestHash();
     error ValidationsNotSatisfied();
     error PolicyViolation();
+    error PausedError();
+    error InvalidChallengePeriod();
 
     // ====================================
     // State Variables
@@ -127,6 +130,8 @@ contract TaskEscrowV2 {
     address public immutable juryContract;
     address public feeRecipient;
     uint256 public challengePeriod;
+    address public owner;
+    bool public paused;
     uint256 private _taskCounter;
     uint256 private _reentrancyStatus;
 
@@ -183,6 +188,8 @@ contract TaskEscrowV2 {
     event ChallengeResolved(bytes32 indexed taskId, bool challengeAccepted);
     event TaskCancelled(bytes32 indexed taskId, uint256 refundAmount);
     event ReceiptLinked(bytes32 indexed taskId, bytes32 indexed receiptId, string receiptUri, address indexed linker);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event Paused(bool paused);
 
     // ====================================
     // Modifiers
@@ -193,6 +200,16 @@ contract TaskEscrowV2 {
         _reentrancyStatus = 1;
         _;
         _reentrancyStatus = 0;
+    }
+
+    modifier onlyOwner() {
+        if (msg.sender != owner) revert NotOwner();
+        _;
+    }
+
+    modifier notPaused() {
+        if (paused) revert PausedError();
+        _;
     }
 
     modifier onlyTaskStatus(bytes32 taskId, TaskStatus requiredStatus) {
@@ -220,6 +237,8 @@ contract TaskEscrowV2 {
         juryContract = _juryContract;
         feeRecipient = _feeRecipient;
         challengePeriod = DEFAULT_CHALLENGE_PERIOD;
+        owner = msg.sender;
+        emit OwnershipTransferred(address(0), msg.sender);
 
         _distributionShares = DistributionShares({
             taskorShare: DEFAULT_TASKOR_SHARE, supplierShare: DEFAULT_SUPPLIER_SHARE, juryShare: DEFAULT_JURY_SHARE
@@ -237,12 +256,34 @@ contract TaskEscrowV2 {
         );
     }
 
+    function transferOwnership(address newOwner) external onlyOwner {
+        if (newOwner == address(0)) revert ZeroAddress();
+        emit OwnershipTransferred(owner, newOwner);
+        owner = newOwner;
+    }
+
+    function setPaused(bool paused_) external onlyOwner {
+        paused = paused_;
+        emit Paused(paused_);
+    }
+
+    function setFeeRecipient(address feeRecipient_) external onlyOwner {
+        if (feeRecipient_ == address(0)) revert ZeroAddress();
+        feeRecipient = feeRecipient_;
+    }
+
+    function setChallengePeriod(uint256 challengePeriod_) external onlyOwner {
+        if (challengePeriod_ == 0) revert InvalidChallengePeriod();
+        challengePeriod = challengePeriod_;
+    }
+
     // ====================================
     // Task Creation
     // ====================================
 
     function createTask(address token, uint256 reward, uint256 deadline, string calldata metadataUri, bytes32 taskType)
         external
+        notPaused
         returns (bytes32 taskId)
     {
         if (reward == 0) revert ZeroAmount();
@@ -294,7 +335,7 @@ contract TaskEscrowV2 {
         uint8 v,
         bytes32 r,
         bytes32 s
-    ) external returns (bytes32 taskId) {
+    ) external notPaused returns (bytes32 taskId) {
         // Execute permit first
         IERC20Permit(token).permit(msg.sender, address(this), reward, permitDeadline, v, r, s);
 
@@ -337,7 +378,7 @@ contract TaskEscrowV2 {
     // Task Acceptance (with signature support from PayBot)
     // ====================================
 
-    function acceptTask(bytes32 taskId) external onlyTaskStatus(taskId, TaskStatus.Open) {
+    function acceptTask(bytes32 taskId) external notPaused onlyTaskStatus(taskId, TaskStatus.Open) {
         Task storage task = _tasks[taskId];
         if (block.timestamp >= task.deadline) revert TaskExpired();
 
@@ -355,6 +396,7 @@ contract TaskEscrowV2 {
      */
     function acceptTaskWithSignature(bytes32 taskId, address taskor, uint256 deadline, uint8 v, bytes32 r, bytes32 s)
         external
+        notPaused
         onlyTaskStatus(taskId, TaskStatus.Open)
     {
         Task storage task = _tasks[taskId];
@@ -383,7 +425,7 @@ contract TaskEscrowV2 {
     // Work Submission & Challenge Period (from PointsRecord)
     // ====================================
 
-    function assignSupplier(bytes32 taskId, address supplier, uint256 fee) external onlyTaskor(taskId) {
+    function assignSupplier(bytes32 taskId, address supplier, uint256 fee) external notPaused onlyTaskor(taskId) {
         Task storage task = _tasks[taskId];
         if (task.status != TaskStatus.Accepted && task.status != TaskStatus.InProgress) {
             revert InvalidTaskState();
@@ -406,7 +448,7 @@ contract TaskEscrowV2 {
      * @notice Submit work and start challenge period
      * @dev From PointsRecord pattern - optimistic completion
      */
-    function submitWork(bytes32 taskId, string calldata evidenceUri) external onlyTaskor(taskId) {
+    function submitWork(bytes32 taskId, string calldata evidenceUri) external notPaused onlyTaskor(taskId) {
         Task storage task = _tasks[taskId];
         if (task.status != TaskStatus.Accepted && task.status != TaskStatus.InProgress) {
             revert InvalidTaskState();
@@ -423,7 +465,7 @@ contract TaskEscrowV2 {
      * @notice Challenge submitted work (community only)
      * @dev From PointsRecord - requires stake to prevent abuse
      */
-    function challengeWork(bytes32 taskId) external payable onlyCommunity(taskId) {
+    function challengeWork(bytes32 taskId) external payable notPaused onlyCommunity(taskId) {
         Task storage task = _tasks[taskId];
         if (task.status != TaskStatus.Submitted) revert InvalidTaskState();
         if (block.timestamp > task.challengeDeadline) revert ChallengePeriodExpired();
@@ -440,7 +482,7 @@ contract TaskEscrowV2 {
      * @notice Auto-finalize after challenge period (anyone can call)
      * @dev From PointsRecord - finalizeRecord pattern
      */
-    function finalizeTask(bytes32 taskId) external nonReentrant {
+    function finalizeTask(bytes32 taskId) external notPaused nonReentrant {
         Task storage task = _tasks[taskId];
         if (task.status != TaskStatus.Submitted) revert InvalidTaskState();
         if (block.timestamp <= task.challengeDeadline) revert ChallengePeriodNotOver();
@@ -455,7 +497,7 @@ contract TaskEscrowV2 {
     /**
      * @notice Community approves work early (skip challenge period)
      */
-    function approveWork(bytes32 taskId) external nonReentrant onlyCommunity(taskId) {
+    function approveWork(bytes32 taskId) external notPaused nonReentrant onlyCommunity(taskId) {
         Task storage task = _tasks[taskId];
         if (task.status != TaskStatus.Submitted) revert InvalidTaskState();
 
@@ -469,7 +511,7 @@ contract TaskEscrowV2 {
     // Jury Resolution (for challenged tasks)
     // ====================================
 
-    function linkJuryValidation(bytes32 taskId, bytes32 juryTaskHash) external {
+    function linkJuryValidation(bytes32 taskId, bytes32 juryTaskHash) external notPaused {
         Task storage task = _tasks[taskId];
         if (task.status != TaskStatus.Challenged) revert InvalidTaskState();
 
@@ -507,7 +549,7 @@ contract TaskEscrowV2 {
     // Cancellation & Refunds
     // ====================================
 
-    function cancelTask(bytes32 taskId) external nonReentrant onlyCommunity(taskId) {
+    function cancelTask(bytes32 taskId) external notPaused nonReentrant onlyCommunity(taskId) {
         Task storage task = _tasks[taskId];
         if (task.status != TaskStatus.Open) revert InvalidTaskState();
 
@@ -517,7 +559,7 @@ contract TaskEscrowV2 {
         emit TaskCancelled(taskId, task.reward);
     }
 
-    function claimExpiredRefund(bytes32 taskId) external nonReentrant onlyCommunity(taskId) {
+    function claimExpiredRefund(bytes32 taskId) external notPaused nonReentrant onlyCommunity(taskId) {
         Task storage task = _tasks[taskId];
         if (block.timestamp <= task.deadline) revert TaskExpired();
         if (task.status != TaskStatus.Open && task.status != TaskStatus.Accepted) {
@@ -530,7 +572,7 @@ contract TaskEscrowV2 {
         emit TaskCancelled(taskId, task.reward);
     }
 
-    function linkReceipt(bytes32 taskId, bytes32 receiptId, string calldata receiptUri) external {
+    function linkReceipt(bytes32 taskId, bytes32 receiptId, string calldata receiptUri) external notPaused {
         Task storage task = _tasks[taskId];
         if (task.taskId == bytes32(0)) revert InvalidTaskState();
         if (receiptId == bytes32(0)) revert InvalidReceipt();
@@ -554,6 +596,7 @@ contract TaskEscrowV2 {
 
     function setTaskValidationRequirement(bytes32 taskId, bytes32 tag, uint64 minCount, uint8 minAvgResponse)
         external
+        notPaused
         onlyCommunity(taskId)
     {
         setTaskValidationRequirementWithValidators(taskId, tag, minCount, minAvgResponse, 0);
@@ -565,7 +608,7 @@ contract TaskEscrowV2 {
         uint64 minCount,
         uint8 minAvgResponse,
         uint8 minUniqueValidators
-    ) public onlyCommunity(taskId) {
+    ) public notPaused onlyCommunity(taskId) {
         if (_tasks[taskId].taskId == bytes32(0)) revert InvalidTaskState();
         if (tag == bytes32(0)) revert InvalidTag();
 
@@ -582,7 +625,7 @@ contract TaskEscrowV2 {
         }
     }
 
-    function clearTaskValidationRequirements(bytes32 taskId) external onlyCommunity(taskId) {
+    function clearTaskValidationRequirements(bytes32 taskId) external notPaused onlyCommunity(taskId) {
         if (_tasks[taskId].taskId == bytes32(0)) revert InvalidTaskState();
 
         bytes32[] storage tags = _taskRequiredValidationTags[taskId];
@@ -594,6 +637,7 @@ contract TaskEscrowV2 {
 
     function setTaskPolicy(bytes32 taskId, uint64 maxReceipts, uint64 maxValidationRequests)
         external
+        notPaused
         onlyCommunity(taskId)
     {
         if (_tasks[taskId].taskId == bytes32(0)) revert InvalidTaskState();
@@ -604,7 +648,11 @@ contract TaskEscrowV2 {
         });
     }
 
-    function setTaskAllowedValidators(bytes32 taskId, address[] calldata validators) external onlyCommunity(taskId) {
+    function setTaskAllowedValidators(bytes32 taskId, address[] calldata validators)
+        external
+        notPaused
+        onlyCommunity(taskId)
+    {
         if (_tasks[taskId].taskId == bytes32(0)) revert InvalidTaskState();
         delete _taskAllowedValidators[taskId];
         for (uint256 i = 0; i < validators.length; i++) {
@@ -612,7 +660,7 @@ contract TaskEscrowV2 {
         }
     }
 
-    function addTaskValidationRequest(bytes32 taskId, bytes32 requestHash) external {
+    function addTaskValidationRequest(bytes32 taskId, bytes32 requestHash) external notPaused {
         Task storage task = _tasks[taskId];
         if (task.taskId == bytes32(0)) revert InvalidTaskState();
         if (requestHash == bytes32(0)) revert InvalidRequestHash();

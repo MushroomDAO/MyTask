@@ -52,6 +52,66 @@ contract TaskEscrowV2Test is Test {
     // Task Creation Tests
     // ====================================
 
+    function test_OwnerControls() public {
+        assertEq(escrow.owner(), address(this));
+
+        escrow.setPaused(true);
+        assertTrue(escrow.paused());
+
+        escrow.setPaused(false);
+        assertFalse(escrow.paused());
+
+        escrow.setFeeRecipient(address(0xBEEF));
+        assertEq(escrow.feeRecipient(), address(0xBEEF));
+
+        escrow.setChallengePeriod(1 days);
+        assertEq(escrow.getChallengePeriod(), 1 days);
+    }
+
+    function test_OwnerControls_RevertForNonOwner() public {
+        vm.prank(community);
+        vm.expectRevert(TaskEscrowV2.NotOwner.selector);
+        escrow.setPaused(true);
+
+        vm.prank(community);
+        vm.expectRevert(TaskEscrowV2.NotOwner.selector);
+        escrow.setFeeRecipient(address(0xBEEF));
+
+        vm.prank(community);
+        vm.expectRevert(TaskEscrowV2.NotOwner.selector);
+        escrow.setChallengePeriod(1 days);
+    }
+
+    function test_TransferOwnership() public {
+        address newOwner = address(0xBEEF);
+        escrow.transferOwnership(newOwner);
+        assertEq(escrow.owner(), newOwner);
+
+        vm.expectRevert(TaskEscrowV2.NotOwner.selector);
+        escrow.setPaused(true);
+
+        vm.prank(newOwner);
+        escrow.setPaused(true);
+        assertTrue(escrow.paused());
+    }
+
+    function test_Paused_BlocksStateChanges() public {
+        escrow.setPaused(true);
+
+        vm.prank(community);
+        vm.expectRevert(TaskEscrowV2.PausedError.selector);
+        escrow.createTask(address(token), REWARD, block.timestamp + 7 days, "ipfs://meta", bytes32("SIMPLE"));
+
+        escrow.setPaused(false);
+        bytes32 taskId = _createTask();
+
+        escrow.setPaused(true);
+
+        vm.prank(taskor);
+        vm.expectRevert(TaskEscrowV2.PausedError.selector);
+        escrow.acceptTask(taskId);
+    }
+
     function test_CreateTask() public {
         bytes32 taskId = _createTask();
 
