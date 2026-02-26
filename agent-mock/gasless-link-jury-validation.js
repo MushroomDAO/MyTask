@@ -184,6 +184,70 @@ function logEvent(obj) {
   } catch {}
 }
 
+function safeErrorString(e) {
+  try {
+    if (!e) return "unknown-error";
+    if (e instanceof Error) return e.stack || e.message || String(e);
+    return typeof e === "string" ? e : JSON.stringify(e);
+  } catch {
+    try {
+      return String(e);
+    } catch {
+      return "unknown-error";
+    }
+  }
+}
+
+function startSpan({ traceId, parentSpanId, name, ...fields }) {
+  const spanId = randomId();
+  const startedAtMs = Date.now();
+  logEvent({
+    event: "trace.spanStart",
+    ok: true,
+    traceId,
+    spanId,
+    parentSpanId: parentSpanId ?? null,
+    name,
+    ...fields
+  });
+  return { spanId, startedAtMs };
+}
+
+function endSpan({ traceId, spanId, parentSpanId, name, startedAtMs, ok, ...fields }) {
+  const durationMs = Math.max(0, Date.now() - Number(startedAtMs ?? Date.now()));
+  logEvent({
+    event: "trace.spanEnd",
+    ok: Boolean(ok),
+    traceId,
+    spanId,
+    parentSpanId: parentSpanId ?? null,
+    name,
+    durationMs,
+    ...fields
+  });
+}
+
+async function withSpan({ traceId, parentSpanId, name, ...fields }, fn) {
+  if (!traceId) return await fn({ traceId: null, spanId: null });
+  const span = startSpan({ traceId, parentSpanId, name, ...fields });
+  try {
+    const out = await fn({ traceId, spanId: span.spanId, parentSpanId });
+    endSpan({ traceId, spanId: span.spanId, parentSpanId, name, startedAtMs: span.startedAtMs, ok: true });
+    return out;
+  } catch (e) {
+    endSpan({
+      traceId,
+      spanId: span.spanId,
+      parentSpanId,
+      name,
+      startedAtMs: span.startedAtMs,
+      ok: false,
+      error: safeErrorString(e)
+    });
+    throw e;
+  }
+}
+
 async function withRetries(fn, { retries, baseDelayMs, label }) {
   const n = retries ?? 2;
   const base = baseDelayMs ?? 250;
@@ -338,10 +402,253 @@ async function main() {
     if (serveApi) {
       const server = nodeHttp.createServer((req, res) => {
         const traceId = req.headers["x-trace-id"] ? String(req.headers["x-trace-id"]) : randomId();
+        res.setHeader("x-trace-id", traceId);
+        const reqStartedAtMs = Date.now();
         const u = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
         const p = u.pathname;
+
+        const sendHtml = (code, html) => {
+          res.writeHead(code, { "content-type": "text/html; charset=utf-8", "content-length": Buffer.byteLength(html) });
+          res.end(html);
+        };
+
+        const roleAddresses = {
+          community: communityAccount.address,
+          taskor: account.address,
+          supplier: supplierAccount.address,
+          jury: validatorAccount.address
+        };
+
+        const uiPage = (role) => {
+          const roleJson = JSON.stringify(role);
+          const addrsJson = JSON.stringify(roleAddresses);
+          const html = `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MyTask Orchestrator – ${role ?? "Dashboard"}</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; margin: 20px; }
+      a { color: inherit; }
+      .top { display: flex; gap: 12px; align-items: baseline; justify-content: space-between; flex-wrap: wrap; }
+      .nav { display: flex; gap: 10px; flex-wrap: wrap; }
+      .pill { padding: 6px 10px; border: 1px solid rgba(127,127,127,0.35); border-radius: 999px; text-decoration: none; }
+      .pill.active { background: rgba(127,127,127,0.18); }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin: 12px 0 18px; }
+      .card { border: 1px solid rgba(127,127,127,0.35); border-radius: 10px; padding: 10px; }
+      .muted { opacity: 0.75; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { border-bottom: 1px solid rgba(127,127,127,0.2); padding: 8px; text-align: left; vertical-align: top; }
+      th { position: sticky; top: 0; background: rgba(20,20,20,0.04); }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+      .nowrap { white-space: nowrap; }
+      .wrap { word-break: break-word; }
+      .right { text-align: right; }
+      .rowErr { color: #b00020; }
+      @media (prefers-color-scheme: dark) { th { background: rgba(255,255,255,0.06); } .rowErr { color: #ff6b6b; } }
+    </style>
+  </head>
+  <body>
+    <div class="top">
+      <div>
+        <div class="mono muted">runId: ${runId} • mode: ${mode} • api: ${apiPort}</div>
+        <h2 style="margin: 6px 0 0;">${role ?? "Dashboard"}</h2>
+      </div>
+      <div class="nav">
+        <a class="pill ${role === null ? "active" : ""}" href="/ui">Overview</a>
+        <a class="pill ${role === "community" ? "active" : ""}" href="/ui/community">Community</a>
+        <a class="pill ${role === "taskor" ? "active" : ""}" href="/ui/taskor">Taskor</a>
+        <a class="pill ${role === "supplier" ? "active" : ""}" href="/ui/supplier">Supplier</a>
+        <a class="pill ${role === "jury" ? "active" : ""}" href="/ui/jury">Jury</a>
+        <a class="pill" href="/metrics">JSON: /metrics</a>
+        <a class="pill" href="/state">JSON: /state</a>
+      </div>
+    </div>
+
+    <div class="grid" id="summary"></div>
+    <div class="card">
+      <div class="mono muted" id="roleAddrs"></div>
+    </div>
+    <div style="height: 14px;"></div>
+
+    <div class="card">
+      <div class="top">
+        <div>
+          <div class="muted">Tasks</div>
+          <div class="mono muted" id="tasksMeta"></div>
+        </div>
+        <div class="mono muted" id="lastRefreshed"></div>
+      </div>
+      <div style="height: 10px;"></div>
+      <div style="overflow: auto;">
+        <table>
+          <thead>
+            <tr>
+              <th class="nowrap">taskId</th>
+              <th class="nowrap">state</th>
+              <th class="nowrap">reward</th>
+              <th>participants</th>
+              <th>links</th>
+              <th class="nowrap">attempts</th>
+              <th>last</th>
+            </tr>
+          </thead>
+          <tbody id="tasks"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <script>
+      const role = ${roleJson};
+      const addrs = ${addrsJson};
+      const taskStateLabel = ${taskStateLabel.toString()};
+      const shortHex = (v) => {
+        const s = String(v ?? "");
+        if (!s.startsWith("0x") || s.length < 16) return s;
+        return s.slice(0, 6) + "…" + s.slice(-4);
+      };
+      const fmtNum = (v) => {
+        const s = String(v ?? "");
+        if (!/^[0-9]+$/.test(s)) return s;
+        try { return Number(s).toLocaleString(); } catch { return s; }
+      };
+      const el = (tag, props = {}, children = []) => {
+        const e = document.createElement(tag);
+        for (const [k, v] of Object.entries(props)) {
+          if (k === "class") e.className = v;
+          else if (k === "text") e.textContent = v;
+          else if (k === "href") e.setAttribute("href", v);
+          else e.setAttribute(k, v);
+        }
+        for (const c of children) e.appendChild(c);
+        return e;
+      };
+      const link = (href, text) => el("a", { href, class: "mono wrap", text });
+
+      const roleFilter = (entry) => {
+        if (role == null) return true;
+        const t = entry?.task;
+        if (role === "community") return t?.community && t.community.toLowerCase() === addrs.community.toLowerCase();
+        if (role === "taskor") return t?.taskor && t.taskor.toLowerCase() === addrs.taskor.toLowerCase();
+        if (role === "supplier") return t?.supplier && t.supplier.toLowerCase() === addrs.supplier.toLowerCase();
+        if (role === "jury") return Boolean(entry?.requestHash || entry?.validation?.request?.requestHash || (t?.juryTaskHash && t.juryTaskHash !== "0x0000000000000000000000000000000000000000000000000000000000000000"));
+        return true;
+      };
+
+      async function load() {
+        const [metricsRes, stateRes] = await Promise.all([fetch("/metrics"), fetch("/state")]);
+        const metrics = await metricsRes.json();
+        const state = await stateRes.json();
+        const tasksAll = Object.values(state?.state?.tasks ?? {}).filter((x) => x && typeof x === "object");
+        const tasks = tasksAll.filter(roleFilter);
+
+        document.getElementById("lastRefreshed").textContent = "refreshed: " + new Date().toISOString();
+        document.getElementById("roleAddrs").textContent =
+          "community: " + addrs.community + " • taskor: " + addrs.taskor + " • supplier: " + addrs.supplier + " • jury: " + addrs.jury;
+        document.getElementById("tasksMeta").textContent = "showing " + tasks.length + " / " + tasksAll.length;
+
+        const byState = new Map();
+        for (const e of tasks) {
+          const s = Number(e?.task?.state ?? e?.lastStatus ?? -1);
+          byState.set(s, (byState.get(s) ?? 0) + 1);
+        }
+
+        const summary = document.getElementById("summary");
+        summary.innerHTML = "";
+        summary.appendChild(el("div", { class: "card" }, [
+          el("div", { class: "muted", text: "Uptime (ms)" }),
+          el("div", { class: "mono", text: fmtNum(metrics?.uptimeMs ?? "") })
+        ]));
+        summary.appendChild(el("div", { class: "card" }, [
+          el("div", { class: "muted", text: "Processed / Failed" }),
+          el("div", { class: "mono", text: fmtNum(metrics?.counters?.tasksProcessed ?? 0) + " / " + fmtNum(metrics?.counters?.tasksFailed ?? 0) })
+        ]));
+        summary.appendChild(el("div", { class: "card" }, [
+          el("div", { class: "muted", text: "x402 Pay Ok / Fail" }),
+          el("div", { class: "mono", text: fmtNum(metrics?.counters?.x402PayOk ?? 0) + " / " + fmtNum(metrics?.counters?.x402PayFail ?? 0) })
+        ]));
+        summary.appendChild(el("div", { class: "card" }, [
+          el("div", { class: "muted", text: "Rewards Ok / Fail" }),
+          el("div", { class: "mono", text: fmtNum(metrics?.counters?.rewardsTriggered ?? 0) + " / " + fmtNum(metrics?.counters?.rewardsFailed ?? 0) })
+        ]));
+
+        const tbody = document.getElementById("tasks");
+        tbody.innerHTML = "";
+        tasks.sort((a, b) => String(b?.lastAttemptAt ?? "").localeCompare(String(a?.lastAttemptAt ?? "")));
+        for (const e of tasks) {
+          const t = e.task ?? {};
+          const stateNum = Number(t.state ?? e.lastStatus ?? -1);
+          const err = e.lastError ? true : false;
+
+          const participants = el("div", { class: "mono wrap" }, [
+            el("div", { text: "community: " + shortHex(t.community) }),
+            el("div", { text: "taskor: " + shortHex(t.taskor) }),
+            el("div", { text: "supplier: " + shortHex(t.supplier) })
+          ]);
+
+          const linksCol = el("div", { class: "wrap" });
+          if (t.evidenceUri) linksCol.appendChild(el("div", {}, [link(t.evidenceUri, "evidence")]));
+          if (e?.taskReceipt?.receiptUri) linksCol.appendChild(el("div", {}, [link(e.taskReceipt.receiptUri, "taskReceipt")]));
+          if (e?.validation?.request?.requestUri) linksCol.appendChild(el("div", {}, [link(e.validation.request.requestUri, "validationRequest")]));
+          if (e?.validation?.response?.responseUri) linksCol.appendChild(el("div", {}, [link(e.validation.response.responseUri, "validationResponse")]));
+
+          const lastCol = el("div", { class: "wrap" }, [
+            el("div", { class: "mono muted", text: e.lastAttemptAt ?? "" }),
+            err ? el("div", { class: "mono rowErr", text: String(e.lastError) }) : el("div", { class: "mono muted", text: "" })
+          ]);
+
+          const tr = document.createElement("tr");
+          if (err) tr.className = "rowErr";
+          tr.appendChild(el("td", { class: "mono nowrap", text: shortHex(t.taskId || e.taskId) }));
+          tr.appendChild(el("td", { class: "mono nowrap", text: taskStateLabel(stateNum) }));
+          tr.appendChild(el("td", { class: "mono nowrap right", text: fmtNum(t.reward) }));
+          tr.appendChild(el("td", {}, [participants]));
+          tr.appendChild(el("td", {}, [linksCol]));
+          tr.appendChild(el("td", { class: "mono nowrap right", text: fmtNum(e.attempts ?? 0) }));
+          tr.appendChild(el("td", {}, [lastCol]));
+          tbody.appendChild(tr);
+        }
+      }
+
+      load().catch((e) => {
+        const s = document.getElementById("summary");
+        s.innerHTML = "";
+        s.appendChild(el("div", { class: "card rowErr" }, [
+          el("div", { class: "muted", text: "UI error" }),
+          el("div", { class: "mono", text: String(e && (e.stack || e.message) || e) })
+        ]));
+      });
+    </script>
+  </body>
+</html>`;
+          return html;
+        };
+
+        if (req.method === "GET" && (p === "/" || p === "/ui")) {
+          logEvent({ event: "orchestrator.http", ok: true, traceId, method: req.method, path: p, code: 200, durationMs: Date.now() - reqStartedAtMs });
+          return sendHtml(200, uiPage(null));
+        }
+        if (req.method === "GET" && p === "/ui/community") {
+          logEvent({ event: "orchestrator.http", ok: true, traceId, method: req.method, path: p, code: 200, durationMs: Date.now() - reqStartedAtMs });
+          return sendHtml(200, uiPage("community"));
+        }
+        if (req.method === "GET" && p === "/ui/taskor") {
+          logEvent({ event: "orchestrator.http", ok: true, traceId, method: req.method, path: p, code: 200, durationMs: Date.now() - reqStartedAtMs });
+          return sendHtml(200, uiPage("taskor"));
+        }
+        if (req.method === "GET" && p === "/ui/supplier") {
+          logEvent({ event: "orchestrator.http", ok: true, traceId, method: req.method, path: p, code: 200, durationMs: Date.now() - reqStartedAtMs });
+          return sendHtml(200, uiPage("supplier"));
+        }
+        if (req.method === "GET" && p === "/ui/jury") {
+          logEvent({ event: "orchestrator.http", ok: true, traceId, method: req.method, path: p, code: 200, durationMs: Date.now() - reqStartedAtMs });
+          return sendHtml(200, uiPage("jury"));
+        }
+
         if (req.method === "GET" && p === "/health") {
-          logEvent({ event: "orchestrator.http", ok: true, traceId, method: req.method, path: p, code: 200 });
+          logEvent({ event: "orchestrator.http", ok: true, traceId, method: req.method, path: p, code: 200, durationMs: Date.now() - reqStartedAtMs });
           return sendJson(res, 200, { ok: true, mode, runId });
         }
         if (req.method === "GET" && p === "/metrics") {
@@ -358,14 +665,14 @@ async function main() {
               lastScanToBlock: state.lastScanToBlock ?? "0"
             }
           };
-          logEvent({ event: "orchestrator.http", ok: true, traceId, method: req.method, path: p, code: 200 });
+          logEvent({ event: "orchestrator.http", ok: true, traceId, method: req.method, path: p, code: 200, durationMs: Date.now() - reqStartedAtMs });
           return sendJson(res, 200, summary);
         }
         if (req.method === "GET" && p === "/state") {
-          logEvent({ event: "orchestrator.http", ok: true, traceId, method: req.method, path: p, code: 200 });
+          logEvent({ event: "orchestrator.http", ok: true, traceId, method: req.method, path: p, code: 200, durationMs: Date.now() - reqStartedAtMs });
           return sendJson(res, 200, { ok: true, state });
         }
-        logEvent({ event: "orchestrator.http", ok: false, traceId, method: req.method, path: p, code: 404 });
+        logEvent({ event: "orchestrator.http", ok: false, traceId, method: req.method, path: p, code: 404, durationMs: Date.now() - reqStartedAtMs });
         return sendJson(res, 404, { error: "not-found" });
       });
       server.listen(apiPort, () => logEvent({ event: "orchestrator.serve", ok: true, port: apiPort }));
@@ -386,6 +693,11 @@ async function main() {
     const communityPrivateKeyRaw = getArgValue(argv, "--communityPrivateKey") ?? process.env.COMMUNITY_PRIVATE_KEY;
     const communityAccount = communityPrivateKeyRaw
       ? privateKeyToAccount(communityPrivateKeyRaw.startsWith("0x") ? communityPrivateKeyRaw : `0x${communityPrivateKeyRaw}`)
+      : account;
+
+    const supplierPrivateKeyRaw = getArgValue(argv, "--supplierPrivateKey") ?? process.env.SUPPLIER_PRIVATE_KEY;
+    const supplierAccount = supplierPrivateKeyRaw
+      ? privateKeyToAccount(supplierPrivateKeyRaw.startsWith("0x") ? supplierPrivateKeyRaw : `0x${supplierPrivateKeyRaw}`)
       : account;
 
     const validatorPrivateKeyRaw = getArgValue(argv, "--validatorPrivateKey") ?? process.env.VALIDATOR_PRIVATE_KEY;
@@ -677,91 +989,109 @@ async function main() {
       return { userOpHash: sentHash, receipt: null };
     };
 
-    const sendTx = async ({ to, data, wallet }) => {
+    const sendTx = async ({ to, data, wallet, traceId, parentSpanId, name }) => {
       const from = aaConfig ? aaConfig.aaAccount : wallet.account.address;
-      if (dryRun) {
-        logEvent({ event: aaConfig ? "orchestrator.dryRunUserOp" : "orchestrator.dryRunTx", mode, sendMode, to, from, data });
-        return null;
-      }
-      return await withRetries(
+      return await withSpan(
+        { traceId, parentSpanId, name: name ?? (aaConfig ? "aa.sendUserOp" : "evm.sendTx"), to, from, sendMode },
         async () => {
-          if (aaConfig) {
-            const out = await sendUserOp({ to, data, value: 0n });
-            return out.userOpHash;
+          if (dryRun) {
+            logEvent({ event: aaConfig ? "orchestrator.dryRunUserOp" : "orchestrator.dryRunTx", mode, sendMode, to, from, data });
+            return null;
           }
-          const hash = await wallet.sendTransaction({ to, data, value: 0n });
-          await publicClient.waitForTransactionReceipt({ hash });
-          return hash;
-        },
-        { retries: 2, baseDelayMs: 300, label: "sendTx" }
+          return await withRetries(
+            async () => {
+              if (aaConfig) {
+                const out = await sendUserOp({ to, data, value: 0n });
+                return out.userOpHash;
+              }
+              const hash = await wallet.sendTransaction({ to, data, value: 0n });
+              await publicClient.waitForTransactionReceipt({ hash });
+              return hash;
+            },
+            { retries: 2, baseDelayMs: 300, label: "sendTx" }
+          );
+        }
       );
     };
 
-    const sendTxWithValue = async ({ to, data, wallet, value }) => {
+    const sendTxWithValue = async ({ to, data, wallet, value, traceId, parentSpanId, name }) => {
       const from = aaConfig ? aaConfig.aaAccount : wallet.account.address;
-      if (dryRun) {
-        logEvent({
-          event: aaConfig ? "orchestrator.dryRunUserOp" : "orchestrator.dryRunTx",
-          mode,
-          sendMode,
-          to,
-          from,
-          data,
-          value: value?.toString?.() ?? String(value)
-        });
-        return null;
-      }
-      return await withRetries(
+      const valueStr = value?.toString?.() ?? String(value);
+      return await withSpan(
+        { traceId, parentSpanId, name: name ?? (aaConfig ? "aa.sendUserOp" : "evm.sendTxWithValue"), to, from, value: valueStr, sendMode },
         async () => {
-          if (aaConfig) {
-            const out = await sendUserOp({ to, data, value: value ?? 0n });
-            return out.userOpHash;
-          }
-          const hash = await wallet.sendTransaction({ to, data, value: value ?? 0n });
-          await publicClient.waitForTransactionReceipt({ hash });
-          return hash;
-        },
-        { retries: 2, baseDelayMs: 300, label: "sendTxWithValue" }
-      );
-    };
-
-    const rpcRequest = async (method, params) => {
-      return await publicClient.request({ method, params });
-    };
-
-    const x402Pay = async ({ url, method, amount, payerAddress, traceId }) => {
-      if (!x402ProxyUrl) return null;
-      try {
-        const receiptUriOut = await withRetries(
-          async () => {
-            const res = await fetch(`${x402ProxyUrl.replace(/\/$/, "")}/pay`, {
-              method: "POST",
-              headers: { "content-type": "application/json", "x-trace-id": traceId ?? "" },
-              body: JSON.stringify({
-                url,
-                method,
-                amount,
-                currency: x402Currency,
-                payerAddress,
-                agentId: agentId.toString(),
-                chainId: String(chainId),
-                sponsorAddress: x402SponsorAddress,
-                policyId: x402PolicyId,
-                metadata: { mode: "orchestrateTasks" }
-              })
+          if (dryRun) {
+            logEvent({
+              event: aaConfig ? "orchestrator.dryRunUserOp" : "orchestrator.dryRunTx",
+              mode,
+              sendMode,
+              to,
+              from,
+              data,
+              value: valueStr
             });
-            const json = await res.json().catch(() => ({}));
-            if (!res.ok) throw new Error(`x402 /pay ${res.status}: ${JSON.stringify(json)}`);
-            return json.receiptUri;
-          },
-          { retries: 2, baseDelayMs: 400, label: "x402Pay" }
-        );
-        counters.x402PayOk += 1;
-        return receiptUriOut;
-      } catch (e) {
-        counters.x402PayFail += 1;
-        throw e;
-      }
+            return null;
+          }
+          return await withRetries(
+            async () => {
+              if (aaConfig) {
+                const out = await sendUserOp({ to, data, value: value ?? 0n });
+                return out.userOpHash;
+              }
+              const hash = await wallet.sendTransaction({ to, data, value: value ?? 0n });
+              await publicClient.waitForTransactionReceipt({ hash });
+              return hash;
+            },
+            { retries: 2, baseDelayMs: 300, label: "sendTxWithValue" }
+          );
+        }
+      );
+    };
+
+    const rpcRequest = async (method, params, { traceId, parentSpanId } = {}) => {
+      return await withSpan({ traceId, parentSpanId, name: "evm.rpc", method }, async () => {
+        return await publicClient.request({ method, params });
+      });
+    };
+
+    const x402Pay = async ({ url, method, amount, payerAddress, traceId, parentSpanId }) => {
+      if (!x402ProxyUrl) return null;
+      return await withSpan(
+        { traceId, parentSpanId, name: "x402.pay", url, method, amount: String(amount ?? ""), payerAddress },
+        async () => {
+          try {
+            const receiptUriOut = await withRetries(
+              async () => {
+                const res = await fetch(`${x402ProxyUrl.replace(/\/$/, "")}/pay`, {
+                  method: "POST",
+                  headers: { "content-type": "application/json", "x-trace-id": traceId ?? "" },
+                  body: JSON.stringify({
+                    url,
+                    method,
+                    amount,
+                    currency: x402Currency,
+                    payerAddress,
+                    agentId: agentId.toString(),
+                    chainId: String(chainId),
+                    sponsorAddress: x402SponsorAddress,
+                    policyId: x402PolicyId,
+                    metadata: { mode: "orchestrateTasks" }
+                  })
+                });
+                const json = await res.json().catch(() => ({}));
+                if (!res.ok) throw new Error(`x402 /pay ${res.status}: ${JSON.stringify(json)}`);
+                return json.receiptUri;
+              },
+              { retries: 2, baseDelayMs: 400, label: "x402Pay" }
+            );
+            counters.x402PayOk += 1;
+            return receiptUriOut;
+          } catch (e) {
+            counters.x402PayFail += 1;
+            throw e;
+          }
+        }
+      );
     };
 
     const saveState = () => {
@@ -770,6 +1100,38 @@ async function main() {
       } catch (e) {
         logEvent({ event: "orchestrator.stateWriteFailed", ok: false, stateFile, error: String(e) });
       }
+    };
+
+    const normalizeTaskForState = (t) => {
+      if (!t) return null;
+      return {
+        taskId: String(t.taskId ?? ""),
+        community: String(t.community ?? ""),
+        taskor: String(t.taskor ?? ""),
+        supplier: String(t.supplier ?? ""),
+        token: String(t.token ?? ""),
+        reward: (t.reward ?? 0n).toString(),
+        supplierFee: (t.supplierFee ?? 0n).toString(),
+        deadline: (t.deadline ?? 0n).toString(),
+        createdAt: (t.createdAt ?? 0n).toString(),
+        state: Number(t.state ?? 0),
+        metadataUri: String(t.metadataUri ?? ""),
+        evidenceUri: String(t.evidenceUri ?? ""),
+        taskType: String(t.taskType ?? ""),
+        minJurors: (t.minJurors ?? 0n).toString(),
+        juryTaskHash: String(t.juryTaskHash ?? "")
+      };
+    };
+
+    const taskStateLabel = (n) => {
+      const v = Number(n);
+      if (v === 0) return "Created";
+      if (v === 1) return "Accepted";
+      if (v === 2) return "Submitted";
+      if (v === 3) return "Validated";
+      if (v === 4) return "Completed";
+      if (v >= 5) return `Done(${v})`;
+      return `State(${v})`;
     };
 
     const taskCreatedEvent = taskEscrowAbi.find((x) => x?.type === "event" && x?.name === "TaskCreated");
@@ -794,6 +1156,15 @@ async function main() {
       const entry = state.tasks[taskIdKey];
       if (entry.done) return;
 
+      const rootSpan = startSpan({
+        traceId,
+        name: "orchestrator.processTask",
+        taskId: taskIdKey,
+        source,
+        blockNumber: blockNumber?.toString?.() ?? null
+      });
+      let rootOk = true;
+
       counters.tasksProcessed += 1;
       entry.attempts = Number(entry.attempts ?? 0) + 1;
       entry.lastAttemptAt = new Date().toISOString();
@@ -802,14 +1173,22 @@ async function main() {
       saveState();
 
       try {
-        const task = await publicClient.readContract({
-          address: taskEscrow,
-          abi: taskEscrowAbi,
-          functionName: "getTask",
-          args: [taskId]
-        });
+        const task = await withSpan(
+          { traceId, parentSpanId: rootSpan.spanId, name: "evm.readContract", to: taskEscrow, functionName: "getTask" },
+          async () => {
+            return await publicClient.readContract({
+              address: taskEscrow,
+              abi: taskEscrowAbi,
+              functionName: "getTask",
+              args: [taskId]
+            });
+          }
+        );
 
         const status = Number(task.state);
+        entry.task = normalizeTaskForState(task);
+        entry.lastStatus = status;
+        saveState();
         if (status >= 5) {
           entry.lastError = null;
           saveState();
@@ -829,18 +1208,18 @@ async function main() {
 
         if (shouldAccept) {
           const data = encodeFunctionData({ abi: taskEscrowAbi, functionName: "acceptTask", args: [taskId] });
-          const txHash = await sendTx({ to: taskEscrow, data, wallet: walletClient });
+          const txHash = await sendTx({ to: taskEscrow, data, wallet: walletClient, traceId, parentSpanId: rootSpan.spanId, name: "task.acceptTask" });
           logTaskEvent({ event: "orchestrator.acceptTask", ok: true, mode, txHash, source });
         }
 
         if (shouldSubmit) {
           const data = encodeFunctionData({ abi: taskEscrowAbi, functionName: "submitEvidence", args: [taskId, evidenceUri] });
-          const txHash = await sendTx({ to: taskEscrow, data, wallet: walletClient });
+          const txHash = await sendTx({ to: taskEscrow, data, wallet: walletClient, traceId, parentSpanId: rootSpan.spanId, name: "task.submitEvidence" });
           logTaskEvent({ event: "orchestrator.submitEvidence", ok: true, mode, evidenceUri, txHash, source });
 
           if (!receiptUri && x402ProxyUrl && BigInt(x402TaskAmount) > 0n) {
             try {
-              receiptUri = await x402Pay({ url: evidenceUri, method: "EVIDENCE", amount: x402TaskAmount, payerAddress: account.address, traceId });
+              receiptUri = await x402Pay({ url: evidenceUri, method: "EVIDENCE", amount: x402TaskAmount, payerAddress: account.address, traceId, parentSpanId: rootSpan.spanId });
               logTaskEvent({ event: "orchestrator.x402Pay", ok: true, mode, kind: "task", receiptUri });
             } catch (e) {
               logTaskEvent({ event: "orchestrator.x402PayFailed", ok: false, mode, kind: "task", error: String(e) });
@@ -851,7 +1230,7 @@ async function main() {
             const receiptId = deriveReceiptId(receiptUri);
             const linkData = encodeFunctionData({ abi: taskEscrowAbi, functionName: "linkReceipt", args: [taskId, receiptId, receiptUri] });
             try {
-              const linkTxHash = await sendTx({ to: taskEscrow, data: linkData, wallet: walletClient });
+              const linkTxHash = await sendTx({ to: taskEscrow, data: linkData, wallet: walletClient, traceId, parentSpanId: rootSpan.spanId, name: "task.linkReceipt" });
               entry.taskReceiptLinked = true;
               entry.taskReceipt = { receiptId, receiptUri, txHash: linkTxHash };
               saveState();
@@ -1075,7 +1454,7 @@ async function main() {
             if (entry.validationRequestSent !== true) {
               const reqData = encodeFunctionData({ abi: juryAbi, functionName: "validationRequest", args: [juryContractAddress, agentId, validationRequestUri, requestHash] });
               try {
-                const reqTxHash = await sendTx({ to: juryContractAddress, data: reqData, wallet: communityWalletClient });
+                const reqTxHash = await sendTx({ to: juryContractAddress, data: reqData, wallet: communityWalletClient, traceId, parentSpanId: rootSpan.spanId, name: "jury.validationRequest" });
                 entry.validationRequestSent = true;
                 saveState();
                 logTaskEvent({ event: "orchestrator.validationRequest", ok: true, mode, requestHash, requestUri: validationRequestUri, txHash: reqTxHash });
@@ -1093,7 +1472,8 @@ async function main() {
                   method: "VALIDATION",
                   amount: x402ValidationAmount,
                   payerAddress: communityAccount.address,
-                  traceId
+                  traceId,
+                  parentSpanId: rootSpan.spanId
                 });
                 logEvent({ event: "orchestrator.x402Pay", mode, kind: "validation", receiptUri: validationReceiptUri });
               } catch (e) {
@@ -1109,7 +1489,7 @@ async function main() {
                 args: [requestHash, validationReceiptId, validationReceiptUri]
               });
               try {
-                const linkValidationReceiptTxHash = await sendTx({ to: juryContractAddress, data: linkValidationReceiptData, wallet: communityWalletClient });
+                const linkValidationReceiptTxHash = await sendTx({ to: juryContractAddress, data: linkValidationReceiptData, wallet: communityWalletClient, traceId, parentSpanId: rootSpan.spanId, name: "jury.linkReceiptToValidation" });
                 logEvent({ event: "orchestrator.linkReceiptToValidation", mode, requestHash, receiptId: validationReceiptId, receiptUri: validationReceiptUri, txHash: linkValidationReceiptTxHash });
               } catch (e) {
                 logEvent({ event: "orchestrator.linkReceiptToValidationFailed", mode, requestHash, error: String(e) });
@@ -1133,7 +1513,7 @@ async function main() {
                   args: [requestHash, validationScore, validationResponseUri, "0x0000000000000000000000000000000000000000000000000000000000000000", validationTag]
                 });
                 try {
-                  const respTxHash = await sendTx({ to: juryContractAddress, data: respData, wallet: validatorWalletClient });
+                  const respTxHash = await sendTx({ to: juryContractAddress, data: respData, wallet: validatorWalletClient, traceId, parentSpanId: rootSpan.spanId, name: "jury.validationResponse" });
                   logEvent({ event: "orchestrator.validationResponse", mode, requestHash, score: validationScore, responseUri: validationResponseUri, tag: validationTag, txHash: respTxHash });
                   entry.validation = entry.validation ?? {};
                   entry.validation.response = {
@@ -1219,7 +1599,7 @@ async function main() {
                 functionName: "submitEvidence",
                 args: [requestHash, validationRequestUri]
               });
-              const subTxHash = await sendTx({ to: juryContractAddress, data: submitEvidenceData, wallet: communityWalletClient });
+              const subTxHash = await sendTx({ to: juryContractAddress, data: submitEvidenceData, wallet: communityWalletClient, traceId, parentSpanId: rootSpan.spanId, name: "juryFlow.submitEvidence" });
               logTaskEvent({ event: "orchestrator.jurySubmitEvidence", ok: true, mode, requestHash, txHash: subTxHash });
             } catch (e) {
               logTaskEvent({ event: "orchestrator.jurySubmitEvidenceFailed", ok: false, mode, requestHash, error: String(e) });
@@ -1231,7 +1611,7 @@ async function main() {
                 functionName: "vote",
                 args: [requestHash, validationScore, validationResponseUri]
               });
-              const voteTxHash = await sendTx({ to: juryContractAddress, data: voteData, wallet: validatorWalletClient });
+              const voteTxHash = await sendTx({ to: juryContractAddress, data: voteData, wallet: validatorWalletClient, traceId, parentSpanId: rootSpan.spanId, name: "juryFlow.vote" });
               logTaskEvent({ event: "orchestrator.juryVote", ok: true, mode, requestHash, score: validationScore, txHash: voteTxHash });
             } catch (e) {
               logTaskEvent({ event: "orchestrator.juryVoteFailed", ok: false, mode, requestHash, error: String(e) });
@@ -1249,8 +1629,8 @@ async function main() {
                 const deadline = BigInt(juryTask.deadline);
                 if (deadline > 0n && deadline >= now) {
                   const delta = deadline - now + 2n;
-                  await rpcRequest("evm_increaseTime", [Number(delta)]);
-                  await rpcRequest("evm_mine", []);
+                  await rpcRequest("evm_increaseTime", [Number(delta)], { traceId, parentSpanId: rootSpan.spanId });
+                  await rpcRequest("evm_mine", [], { traceId, parentSpanId: rootSpan.spanId });
                   logTaskEvent({ event: "orchestrator.fastForward", ok: true, mode, seconds: Number(delta) });
                 }
               } catch (e) {
@@ -1260,7 +1640,7 @@ async function main() {
 
             try {
               const finalizeJuryData = encodeFunctionData({ abi: juryFlowAbi, functionName: "finalizeTask", args: [requestHash] });
-              const finalizeJuryTxHash = await sendTx({ to: juryContractAddress, data: finalizeJuryData, wallet: walletClient });
+              const finalizeJuryTxHash = await sendTx({ to: juryContractAddress, data: finalizeJuryData, wallet: walletClient, traceId, parentSpanId: rootSpan.spanId, name: "juryFlow.finalizeTask" });
               logTaskEvent({ event: "orchestrator.juryFinalize", ok: true, mode, requestHash, txHash: finalizeJuryTxHash });
             } catch (e) {
               logTaskEvent({ event: "orchestrator.juryFinalizeFailed", ok: false, mode, requestHash, error: String(e) });
@@ -1271,7 +1651,7 @@ async function main() {
               const refreshedStatus = Number(refreshedTask.state);
               if (refreshedStatus === 3) {
                 const linkData = encodeFunctionData({ abi: taskEscrowAbi, functionName: "linkJuryValidation", args: [taskId, requestHash] });
-                const linkTxHash = await sendTx({ to: taskEscrow, data: linkData, wallet: walletClient });
+                const linkTxHash = await sendTx({ to: taskEscrow, data: linkData, wallet: walletClient, traceId, parentSpanId: rootSpan.spanId, name: "task.linkJuryValidation" });
                 logTaskEvent({ event: "orchestrator.linkJuryValidation", ok: true, mode, requestHash, txHash: linkTxHash });
               }
             } catch (e) {
@@ -1283,7 +1663,7 @@ async function main() {
               const refreshedStatus2 = Number(refreshedTask2.state);
               if (refreshedStatus2 === 4) {
                 const completeData = encodeFunctionData({ abi: taskEscrowAbi, functionName: "completeTask", args: [taskId] });
-                const completeTxHash = await sendTx({ to: taskEscrow, data: completeData, wallet: walletClient });
+                const completeTxHash = await sendTx({ to: taskEscrow, data: completeData, wallet: walletClient, traceId, parentSpanId: rootSpan.spanId, name: "task.completeTask" });
                 logTaskEvent({ event: "orchestrator.completeTask", ok: true, mode, txHash: completeTxHash });
               }
             } catch (e) {
@@ -1334,7 +1714,10 @@ async function main() {
               to: myShopItemsAddress,
               data: rewardData,
               wallet: walletClient,
-              value: rewardValue
+              value: rewardValue,
+              traceId,
+              parentSpanId: rootSpan.spanId,
+              name: "reward.buy"
             });
             entry.rewardTriggered = true;
             entry.rewardTxHash = rewardTxHash;
@@ -1367,10 +1750,13 @@ async function main() {
         entry.lastStatus = finalStatus;
         saveState();
       } catch (e) {
+        rootOk = false;
         entry.lastError = String(e);
         saveState();
         logTaskEvent({ event: "orchestrator.taskFailed", ok: false, mode, source, error: String(e) });
         counters.tasksFailed += 1;
+      } finally {
+        endSpan({ traceId, spanId: rootSpan.spanId, name: "orchestrator.processTask", startedAtMs: rootSpan.startedAtMs, ok: rootOk });
       }
     };
 

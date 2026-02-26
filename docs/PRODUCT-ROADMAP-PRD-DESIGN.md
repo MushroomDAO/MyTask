@@ -292,6 +292,7 @@ Missing for a complete “agent economy” product:
 ## 8) Open Questions (must decide early)
 
 - What is the canonical “agentId” source of truth (SBT tokenId vs registry mapping vs derived)?
+
 - Which payment authorization rails are mandatory for MVP:
   - ERC-2612, EIP-3009 (token-specific), or AA-only?
 - What is the minimum viable dispute model:
@@ -595,3 +596,6 @@ Missing for a complete “agent economy” product:
 - 最小争议模型是什么：
   - “软争议”（只影响声誉）还是 “硬争议”（罚没 + 链上仲裁）？
 - 回执存储在哪里、链上记录到什么粒度（仅 hash vs 完整 URI）？
+
+
+PRD “Open Questions” still need decisions (agentId source of truth, which payment-authorization rails are mandatory, dispute model depth, and receipt storage strategy) in PRODUCT-ROADMAP-PRD-DESIGN.md:L292-L300 .
