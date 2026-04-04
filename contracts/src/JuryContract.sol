@@ -2,6 +2,7 @@
 pragma solidity ^0.8.23;
 
 import {IJuryContract} from "./interfaces/IJuryContract.sol";
+import {ITaskCallback} from "./interfaces/ITaskCallback.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 interface IMySBT {
@@ -220,7 +221,11 @@ contract JuryContract is IJuryContract {
             params.reward,
             params.deadline,
             params.minJurors,
-            params.consensusThreshold
+            params.consensusThreshold,
+            params.contextId,
+            params.contextType,
+            params.callbackAddress,
+            params.positiveThreshold
         );
 
         emit TaskCreated(taskHash, params.agentId, params.taskType, params.reward, params.deadline);
@@ -237,7 +242,11 @@ contract JuryContract is IJuryContract {
         uint256 reward,
         uint256 deadline,
         uint256 minJurors,
-        uint256 consensusThreshold
+        uint256 consensusThreshold,
+        bytes32 contextId,
+        bytes32 contextType,
+        address callbackAddress,
+        uint8 positiveThreshold
     ) internal {
         require(_tasks[taskHash].taskHash == bytes32(0), "Task exists");
 
@@ -253,7 +262,11 @@ contract JuryContract is IJuryContract {
             consensusThreshold: consensusThreshold == 0 ? DEFAULT_CONSENSUS : consensusThreshold,
             totalVotes: 0,
             positiveVotes: 0,
-            finalResponse: 0
+            finalResponse: 0,
+            contextId: contextId,
+            contextType: contextType,
+            callbackAddress: callbackAddress,
+            positiveThreshold: positiveThreshold
         });
 
         _taskCreators[taskHash] = creator;
@@ -302,7 +315,8 @@ contract JuryContract is IJuryContract {
         );
 
         task.totalVotes++;
-        if (response >= 50) {
+        uint8 threshold = task.positiveThreshold == 0 ? 50 : task.positiveThreshold;
+        if (response >= threshold) {
             task.positiveVotes++;
         }
 
@@ -346,6 +360,21 @@ contract JuryContract is IJuryContract {
 
         emit ValidationResponse(address(this), task.agentId, taskHash, task.finalResponse, "", validationTag);
         emit TaskFinalized(taskHash, task.finalResponse, task.totalVotes, task.positiveVotes);
+
+        // Callback notification (after all state changes, so callback sees final state)
+        if (task.callbackAddress != address(0)) {
+            bool consensusReached = (task.status == TaskStatus.COMPLETED);
+            try ITaskCallback(task.callbackAddress).onTaskFinalized(
+                taskHash,
+                task.finalResponse,
+                consensusReached
+            ) {
+                emit TaskCallbackCalled(taskHash, task.callbackAddress);
+            } catch {
+                // Callback failure must NOT affect the finalization result
+                emit TaskCallbackFailed(taskHash, task.callbackAddress);
+            }
+        }
     }
 
     /// @inheritdoc IJuryContract
@@ -481,7 +510,11 @@ contract JuryContract is IJuryContract {
             0,
             block.timestamp + DEFAULT_REQUEST_DEADLINE_WINDOW,
             DEFAULT_REQUEST_MIN_JURORS,
-            DEFAULT_CONSENSUS
+            DEFAULT_CONSENSUS,
+            bytes32(0),
+            bytes32(0),
+            address(0),
+            0
         );
 
         _validatorRequests[validatorAddress].push(taskHash);

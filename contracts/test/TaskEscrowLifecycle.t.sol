@@ -121,7 +121,11 @@ contract TaskEscrowLifecycleTest is Test {
             reward: 0,
             deadline: block.timestamp + 7 days,
             minJurors: 3,
-            consensusThreshold: 6600
+            consensusThreshold: 6600,
+            contextId: bytes32(0),
+            contextType: bytes32(0),
+            callbackAddress: address(0),
+            positiveThreshold: 0
         });
 
         vm.prank(agent);
