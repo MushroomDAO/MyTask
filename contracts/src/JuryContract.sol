@@ -205,7 +205,9 @@ contract JuryContract is IJuryContract {
         require(params.deadline > block.timestamp, "Invalid deadline");
         require(params.minJurors > 0, "Min jurors must be > 0");
         require(params.consensusThreshold <= 10000, "Invalid threshold");
-        if (mySBT.code.length > 0) {
+        // agentId=0 means "no agent" (context-only dispute, e.g. DisputeEscrow); skip SBT check.
+        // Protocol invariant: MySBT must never mint token ID 0 — token IDs start from 1.
+        if (mySBT.code.length > 0 && params.agentId != 0) {
             require(_agentIdIsActive(params.agentId), "Invalid agentId");
         }
 
@@ -270,7 +272,11 @@ contract JuryContract is IJuryContract {
         });
 
         _taskCreators[taskHash] = creator;
-        _agentValidations[agentId].push(taskHash);
+        // agentId=0 means "no agent"; skip the ERC-8004 validation list to avoid
+        // an unbounded shared bucket (spam/DoS risk) and semantically incorrect summaries.
+        if (agentId != 0) {
+            _agentValidations[agentId].push(taskHash);
+        }
     }
 
     /// @inheritdoc IJuryContract
@@ -296,7 +302,8 @@ contract JuryContract is IJuryContract {
         Task storage task = _tasks[taskHash];
         require(task.taskHash != bytes32(0), "Task not found");
         require(_taskCreators[taskHash] != msg.sender, "Conflict of interest");
-        if (mySBT.code.length > 0) {
+        // agentId=0 means no agent; skip SBT ownership check to avoid probing ownerOf(0)
+        if (mySBT.code.length > 0 && task.agentId != 0) {
             try IMySBT(mySBT).ownerOf(task.agentId) returns (address owner) {
                 require(owner != msg.sender, "Conflict of interest");
             } catch {}
@@ -545,7 +552,8 @@ contract JuryContract is IJuryContract {
         Task storage task = _tasks[requestHash];
         require(task.taskHash != bytes32(0), "Task not found");
         require(_taskCreators[requestHash] != msg.sender, "Conflict of interest");
-        if (mySBT.code.length > 0) {
+        // agentId=0 means no agent; skip SBT ownership check
+        if (mySBT.code.length > 0 && task.agentId != 0) {
             try IMySBT(mySBT).ownerOf(task.agentId) returns (address owner) {
                 require(owner != msg.sender, "Conflict of interest");
             } catch {}

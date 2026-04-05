@@ -951,6 +951,91 @@ contract JuryContractTest is Test {
         assertFalse(mockCb.lastReached()); // DISPUTED → reached = false
     }
 
+    /// @dev Test 4c: agentId=0 (anonymous context-only dispute) full flow: create→evidence→vote→finalize→callback
+    /// Covers the DisputeEscrow use case where no SBT agent is involved.
+    function test_AgentId0_ContextOnlyDispute_FullFlow() public {
+        vm.prank(juror1);
+        jury.registerJuror(MIN_STAKE);
+
+        MockTaskCallback mockCb = new MockTaskCallback();
+        bytes32 purchaseId = keccak256("purchase-abc-123");
+        bytes32 contextType = keccak256("PURCHASE_DISPUTE");
+
+        // agentId=0: no SBT check should occur
+        IJuryContract.TaskParams memory params = IJuryContract.TaskParams({
+            agentId: 0,
+            taskType: IJuryContract.TaskType.SIMPLE_VERIFICATION,
+            evidenceUri: "ipfs://dispute-evidence",
+            reward: 0,
+            deadline: block.timestamp + 7 days,
+            minJurors: 1,
+            consensusThreshold: 5000,
+            contextId: purchaseId,
+            contextType: contextType,
+            callbackAddress: address(mockCb),
+            positiveThreshold: 0
+        });
+
+        vm.prank(taskCreator);
+        bytes32 taskHash = jury.createTask(params);
+
+        // Verify contextId / agentId stored correctly
+        IJuryContract.Task memory task = jury.getTask(taskHash);
+        assertEq(task.agentId, 0);
+        assertEq(task.contextId, purchaseId);
+        assertEq(task.contextType, contextType);
+
+        // Submit evidence → move to IN_PROGRESS
+        vm.prank(taskCreator);
+        jury.submitEvidence(taskHash, "ipfs://dispute-evidence");
+
+        // Juror votes positive (buyer wins)
+        vm.prank(juror1);
+        jury.vote(taskHash, 80, "buyer submitted valid refund evidence");
+
+        // Finalize — expect callback to be called with taskHash as contextId proxy
+        vm.expectEmit(true, true, false, false);
+        emit IJuryContract.TaskCallbackCalled(taskHash, address(mockCb));
+        jury.finalizeTask(taskHash);
+
+        // Verify finalization outcome
+        task = jury.getTask(taskHash);
+        assertEq(uint8(task.status), uint8(IJuryContract.TaskStatus.COMPLETED));
+        assertEq(task.finalResponse, 80);
+
+        // Verify callback received correct arguments
+        assertTrue(mockCb.called());
+        assertEq(mockCb.lastTaskHash(), taskHash);
+        assertEq(mockCb.lastFinalScore(), 80);
+        assertTrue(mockCb.lastReached()); // consensus reached → buyer wins
+
+        // agentId=0 tasks must NOT pollute _agentValidations[0] (DoS/spam guard)
+        bytes32[] memory agentZeroList = jury.getAgentValidations(0);
+        assertEq(agentZeroList.length, 0);
+    }
+
+    /// @dev Test 4d: agentId=0 rejects revoked-check bypass — verify that agentId=1 (real agent)
+    /// still fails when the SBT is revoked (regression guard for the agentId!=0 path).
+    function test_AgentId0_DoesNotBypassRevokedCheckForNonZeroAgent() public {
+        sbt.setRevoked(AGENT_ID, true);
+        IJuryContract.TaskParams memory params = IJuryContract.TaskParams({
+            agentId: AGENT_ID,
+            taskType: IJuryContract.TaskType.CONSENSUS_REQUIRED,
+            evidenceUri: "ipfs://QmEvidence",
+            reward: 0,
+            deadline: block.timestamp + 7 days,
+            minJurors: 1,
+            consensusThreshold: 6600,
+            contextId: bytes32(0),
+            contextType: bytes32(0),
+            callbackAddress: address(0),
+            positiveThreshold: 0
+        });
+        vm.prank(taskCreator);
+        vm.expectRevert("Invalid agentId");
+        jury.createTask(params);
+    }
+
     /// @dev Test 5: callback failure does NOT revert finalization
     function test_CallbackFailureDoesNotRevertFinalization() public {
         vm.prank(juror1);
