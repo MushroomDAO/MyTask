@@ -364,14 +364,14 @@ contract JuryContract is IJuryContract {
         // Callback notification (after all state changes, so callback sees final state)
         if (task.callbackAddress != address(0)) {
             bool consensusReached = (task.status == TaskStatus.COMPLETED);
-            try ITaskCallback(task.callbackAddress).onTaskFinalized(
+            try ITaskCallback(task.callbackAddress).onTaskFinalized{gas: 100_000}(
                 taskHash,
                 task.finalResponse,
                 consensusReached
             ) {
                 emit TaskCallbackCalled(taskHash, task.callbackAddress);
             } catch {
-                // Callback failure must NOT affect the finalization result
+                // Callback failure (including OOG within the gas cap) must NOT affect finalization
                 emit TaskCallbackFailed(taskHash, task.callbackAddress);
             }
         }
