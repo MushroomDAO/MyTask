@@ -733,10 +733,11 @@ contract JuryContractTest is Test {
 
         // Verify new fields are zero
         IJuryContract.Task memory task = jury.getTask(taskHash);
-        assertEq(task.contextId, bytes32(0));
-        assertEq(task.contextType, bytes32(0));
-        assertEq(task.callbackAddress, address(0));
-        assertEq(task.positiveThreshold, 0);
+        IJuryContract.TaskExtension memory ext = jury.getTaskExtension(taskHash);
+        assertEq(ext.contextId, bytes32(0));
+        assertEq(ext.contextType, bytes32(0));
+        assertEq(ext.callbackAddress, address(0));
+        assertEq(ext.positiveThreshold, 0);
 
         // Submit evidence and vote
         vm.prank(taskCreator);
@@ -775,9 +776,9 @@ contract JuryContractTest is Test {
         vm.prank(taskCreator);
         bytes32 taskHash = jury.createTask(params);
 
-        IJuryContract.Task memory task = jury.getTask(taskHash);
-        assertEq(task.contextId, purchaseId);
-        assertEq(task.contextType, contextType);
+        IJuryContract.TaskExtension memory ext = jury.getTaskExtension(taskHash);
+        assertEq(ext.contextId, purchaseId);
+        assertEq(ext.contextType, contextType);
     }
 
     /// @dev Test 3: custom positiveThreshold — score of 65 is NOT positive when threshold=70
@@ -982,8 +983,9 @@ contract JuryContractTest is Test {
         // Verify contextId / agentId stored correctly
         IJuryContract.Task memory task = jury.getTask(taskHash);
         assertEq(task.agentId, 0);
-        assertEq(task.contextId, purchaseId);
-        assertEq(task.contextType, contextType);
+        IJuryContract.TaskExtension memory ext = jury.getTaskExtension(taskHash);
+        assertEq(ext.contextId, purchaseId);
+        assertEq(ext.contextType, contextType);
 
         // Submit evidence → move to IN_PROGRESS
         vm.prank(taskCreator);

@@ -65,6 +65,9 @@ contract JuryContract is IJuryContract {
     /// @notice Task data by hash
     mapping(bytes32 => Task) private _tasks;
 
+    /// @notice Extension data for context-aware tasks (only written when non-zero)
+    mapping(bytes32 => TaskExtension) private _taskExtensions;
+
     /// @notice Votes for each task
     mapping(bytes32 => Vote[]) private _taskVotes;
 
@@ -264,11 +267,7 @@ contract JuryContract is IJuryContract {
             consensusThreshold: consensusThreshold == 0 ? DEFAULT_CONSENSUS : consensusThreshold,
             totalVotes: 0,
             positiveVotes: 0,
-            finalResponse: 0,
-            contextId: contextId,
-            contextType: contextType,
-            callbackAddress: callbackAddress,
-            positiveThreshold: positiveThreshold
+            finalResponse: 0
         });
 
         _taskCreators[taskHash] = creator;
@@ -276,6 +275,17 @@ contract JuryContract is IJuryContract {
         // an unbounded shared bucket (spam/DoS risk) and semantically incorrect summaries.
         if (agentId != 0) {
             _agentValidations[agentId].push(taskHash);
+        }
+
+        // Only write extension storage when at least one field is non-zero.
+        // Saves ~60,000 gas for pure agent-validation tasks that don't use callbacks.
+        if (contextId != bytes32(0) || contextType != bytes32(0) || callbackAddress != address(0) || positiveThreshold != 0) {
+            _taskExtensions[taskHash] = TaskExtension({
+                contextId: contextId,
+                contextType: contextType,
+                callbackAddress: callbackAddress,
+                positiveThreshold: positiveThreshold
+            });
         }
     }
 
@@ -322,7 +332,7 @@ contract JuryContract is IJuryContract {
         );
 
         task.totalVotes++;
-        uint8 threshold = task.positiveThreshold == 0 ? 50 : task.positiveThreshold;
+        uint8 threshold = _taskExtensions[taskHash].positiveThreshold == 0 ? 50 : _taskExtensions[taskHash].positiveThreshold;
         if (response >= threshold) {
             task.positiveVotes++;
         }
@@ -369,17 +379,18 @@ contract JuryContract is IJuryContract {
         emit TaskFinalized(taskHash, task.finalResponse, task.totalVotes, task.positiveVotes);
 
         // Callback notification (after all state changes, so callback sees final state)
-        if (task.callbackAddress != address(0)) {
+        TaskExtension storage ext = _taskExtensions[taskHash];
+        if (ext.callbackAddress != address(0)) {
             bool consensusReached = (task.status == TaskStatus.COMPLETED);
-            try ITaskCallback(task.callbackAddress).onTaskFinalized{gas: 100_000}(
+            try ITaskCallback(ext.callbackAddress).onTaskFinalized{gas: 100_000}(
                 taskHash,
                 task.finalResponse,
                 consensusReached
             ) {
-                emit TaskCallbackCalled(taskHash, task.callbackAddress);
+                emit TaskCallbackCalled(taskHash, ext.callbackAddress);
             } catch {
                 // Callback failure (including OOG within the gas cap) must NOT affect finalization
-                emit TaskCallbackFailed(taskHash, task.callbackAddress);
+                emit TaskCallbackFailed(taskHash, ext.callbackAddress);
             }
         }
     }
@@ -451,6 +462,11 @@ contract JuryContract is IJuryContract {
     /// @inheritdoc IJuryContract
     function getTask(bytes32 taskHash) external view returns (Task memory task) {
         return _tasks[taskHash];
+    }
+
+    /// @inheritdoc IJuryContract
+    function getTaskExtension(bytes32 taskHash) external view returns (TaskExtension memory) {
+        return _taskExtensions[taskHash];
     }
 
     /// @inheritdoc IJuryContract

@@ -67,11 +67,16 @@ interface IJuryContract is IERC8004ValidationRegistry {
         uint256 totalVotes;
         uint256 positiveVotes;
         uint8 finalResponse;
-        // New fields for generic context (all have zero-value defaults for backward compat)
-        bytes32 contextId;        // Generic subject ID (0 for agent tasks, purchaseId for disputes)
-        bytes32 contextType;      // Semantic type tag (use keccak256 of type name)
-        address callbackAddress;  // Address implementing ITaskCallback (address(0) = no callback)
-        uint8 positiveThreshold;  // Score >= this counts as positive vote (0 = use default of 50)
+    }
+
+    /// @notice Extension data for context-aware tasks.
+    ///         Stored in a separate mapping; only written when at least one field is non-zero.
+    ///         Agent validation tasks (agentId != 0, no callback) pay zero gas for this struct.
+    struct TaskExtension {
+        bytes32 contextId;        // Generic subject ID (purchaseId for disputes, 0 for agent tasks)
+        bytes32 contextType;      // Semantic type tag (use CONTEXT_* constants)
+        address callbackAddress;  // ITaskCallback implementer (address(0) = no callback)
+        uint8 positiveThreshold;  // Score >= this counts as positive vote (0 = default 50)
     }
 
     /// @notice Juror vote record
@@ -182,6 +187,13 @@ interface IJuryContract is IERC8004ValidationRegistry {
      * @return task Task data
      */
     function getTask(bytes32 taskHash) external view returns (Task memory task);
+
+    /**
+     * @notice Get extension data for a context-aware task
+     * @param taskHash Task hash
+     * @return ext Extension data (all zero for agent validation tasks)
+     */
+    function getTaskExtension(bytes32 taskHash) external view returns (TaskExtension memory ext);
 
     /**
      * @notice Get votes for task
