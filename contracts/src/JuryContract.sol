@@ -2,6 +2,7 @@
 pragma solidity ^0.8.23;
 
 import {IJuryContract} from "./interfaces/IJuryContract.sol";
+import {ITaskCallback} from "./interfaces/ITaskCallback.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 interface IMySBT {
@@ -63,6 +64,9 @@ contract JuryContract is IJuryContract {
 
     /// @notice Task data by hash
     mapping(bytes32 => Task) private _tasks;
+
+    /// @notice Extension data for context-aware tasks (only written when non-zero)
+    mapping(bytes32 => TaskExtension) private _taskExtensions;
 
     /// @notice Votes for each task
     mapping(bytes32 => Vote[]) private _taskVotes;
@@ -204,7 +208,9 @@ contract JuryContract is IJuryContract {
         require(params.deadline > block.timestamp, "Invalid deadline");
         require(params.minJurors > 0, "Min jurors must be > 0");
         require(params.consensusThreshold <= 10000, "Invalid threshold");
-        if (mySBT.code.length > 0) {
+        // agentId=0 means "no agent" (context-only dispute, e.g. DisputeEscrow); skip SBT check.
+        // Protocol invariant: MySBT must never mint token ID 0 — token IDs start from 1.
+        if (mySBT.code.length > 0 && params.agentId != 0) {
             require(_agentIdIsActive(params.agentId), "Invalid agentId");
         }
 
@@ -220,7 +226,11 @@ contract JuryContract is IJuryContract {
             params.reward,
             params.deadline,
             params.minJurors,
-            params.consensusThreshold
+            params.consensusThreshold,
+            params.contextId,
+            params.contextType,
+            params.callbackAddress,
+            params.positiveThreshold
         );
 
         emit TaskCreated(taskHash, params.agentId, params.taskType, params.reward, params.deadline);
@@ -237,7 +247,11 @@ contract JuryContract is IJuryContract {
         uint256 reward,
         uint256 deadline,
         uint256 minJurors,
-        uint256 consensusThreshold
+        uint256 consensusThreshold,
+        bytes32 contextId,
+        bytes32 contextType,
+        address callbackAddress,
+        uint8 positiveThreshold
     ) internal {
         require(_tasks[taskHash].taskHash == bytes32(0), "Task exists");
 
@@ -257,7 +271,22 @@ contract JuryContract is IJuryContract {
         });
 
         _taskCreators[taskHash] = creator;
-        _agentValidations[agentId].push(taskHash);
+        // agentId=0 means "no agent"; skip the ERC-8004 validation list to avoid
+        // an unbounded shared bucket (spam/DoS risk) and semantically incorrect summaries.
+        if (agentId != 0) {
+            _agentValidations[agentId].push(taskHash);
+        }
+
+        // Only write extension storage when at least one field is non-zero.
+        // Saves ~60,000 gas for pure agent-validation tasks that don't use callbacks.
+        if (contextId != bytes32(0) || contextType != bytes32(0) || callbackAddress != address(0) || positiveThreshold != 0) {
+            _taskExtensions[taskHash] = TaskExtension({
+                contextId: contextId,
+                contextType: contextType,
+                callbackAddress: callbackAddress,
+                positiveThreshold: positiveThreshold
+            });
+        }
     }
 
     /// @inheritdoc IJuryContract
@@ -283,7 +312,8 @@ contract JuryContract is IJuryContract {
         Task storage task = _tasks[taskHash];
         require(task.taskHash != bytes32(0), "Task not found");
         require(_taskCreators[taskHash] != msg.sender, "Conflict of interest");
-        if (mySBT.code.length > 0) {
+        // agentId=0 means no agent; skip SBT ownership check to avoid probing ownerOf(0)
+        if (mySBT.code.length > 0 && task.agentId != 0) {
             try IMySBT(mySBT).ownerOf(task.agentId) returns (address owner) {
                 require(owner != msg.sender, "Conflict of interest");
             } catch {}
@@ -302,7 +332,8 @@ contract JuryContract is IJuryContract {
         );
 
         task.totalVotes++;
-        if (response >= 50) {
+        uint8 threshold = _taskExtensions[taskHash].positiveThreshold == 0 ? 50 : _taskExtensions[taskHash].positiveThreshold;
+        if (response >= threshold) {
             task.positiveVotes++;
         }
 
@@ -346,6 +377,22 @@ contract JuryContract is IJuryContract {
 
         emit ValidationResponse(address(this), task.agentId, taskHash, task.finalResponse, "", validationTag);
         emit TaskFinalized(taskHash, task.finalResponse, task.totalVotes, task.positiveVotes);
+
+        // Callback notification (after all state changes, so callback sees final state)
+        TaskExtension storage ext = _taskExtensions[taskHash];
+        if (ext.callbackAddress != address(0)) {
+            bool consensusReached = (task.status == TaskStatus.COMPLETED);
+            try ITaskCallback(ext.callbackAddress).onTaskFinalized{gas: 100_000}(
+                taskHash,
+                task.finalResponse,
+                consensusReached
+            ) {
+                emit TaskCallbackCalled(taskHash, ext.callbackAddress);
+            } catch {
+                // Callback failure (including OOG within the gas cap) must NOT affect finalization
+                emit TaskCallbackFailed(taskHash, ext.callbackAddress);
+            }
+        }
     }
 
     /// @inheritdoc IJuryContract
@@ -418,6 +465,11 @@ contract JuryContract is IJuryContract {
     }
 
     /// @inheritdoc IJuryContract
+    function getTaskExtension(bytes32 taskHash) external view returns (TaskExtension memory) {
+        return _taskExtensions[taskHash];
+    }
+
+    /// @inheritdoc IJuryContract
     function getVotes(bytes32 taskHash) external view returns (Vote[] memory votes) {
         return _taskVotes[taskHash];
     }
@@ -481,7 +533,11 @@ contract JuryContract is IJuryContract {
             0,
             block.timestamp + DEFAULT_REQUEST_DEADLINE_WINDOW,
             DEFAULT_REQUEST_MIN_JURORS,
-            DEFAULT_CONSENSUS
+            DEFAULT_CONSENSUS,
+            bytes32(0),
+            bytes32(0),
+            address(0),
+            0
         );
 
         _validatorRequests[validatorAddress].push(taskHash);
@@ -512,7 +568,8 @@ contract JuryContract is IJuryContract {
         Task storage task = _tasks[requestHash];
         require(task.taskHash != bytes32(0), "Task not found");
         require(_taskCreators[requestHash] != msg.sender, "Conflict of interest");
-        if (mySBT.code.length > 0) {
+        // agentId=0 means no agent; skip SBT ownership check
+        if (mySBT.code.length > 0 && task.agentId != 0) {
             try IMySBT(mySBT).ownerOf(task.agentId) returns (address owner) {
                 require(owner != msg.sender, "Conflict of interest");
             } catch {}

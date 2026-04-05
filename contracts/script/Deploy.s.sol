@@ -243,7 +243,11 @@ contract DemoLifecycle is Script {
             reward: 0,
             deadline: type(uint256).max,
             minJurors: 3,
-            consensusThreshold: 6600
+            consensusThreshold: 6600,
+            contextId: bytes32(0),
+            contextType: bytes32(0),
+            callbackAddress: address(0),
+            positiveThreshold: 0
         });
         _advance();
         juryTaskHash = jury.createTask(juryParams);

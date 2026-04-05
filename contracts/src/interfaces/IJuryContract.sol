@@ -3,6 +3,11 @@ pragma solidity ^0.8.23;
 
 import "./IERC8004ValidationRegistry.sol";
 
+// Standard contextType values (use keccak256 of type name)
+bytes32 constant CONTEXT_AGENT_VALIDATION = keccak256("AGENT_VALIDATION");
+bytes32 constant CONTEXT_PURCHASE_DISPUTE = keccak256("PURCHASE_DISPUTE");
+bytes32 constant CONTEXT_TASK_DISPUTE     = keccak256("TASK_DISPUTE");
+
 /**
  * @title IJuryContract
  * @notice Jury-based validation for ERC-8004 compliance
@@ -41,6 +46,11 @@ interface IJuryContract is IERC8004ValidationRegistry {
         uint256 deadline;
         uint256 minJurors;
         uint256 consensusThreshold; // Basis points (6600 = 66%)
+        // New fields for generic context (all have zero-value defaults for backward compat)
+        bytes32 contextId;        // Generic subject ID (0 for agent tasks, purchaseId for disputes)
+        bytes32 contextType;      // Semantic type tag (use keccak256 of type name)
+        address callbackAddress;  // Address implementing ITaskCallback (address(0) = no callback)
+        uint8 positiveThreshold;  // Score >= this counts as positive vote (0 = use default of 50)
     }
 
     /// @notice Full task data
@@ -57,6 +67,16 @@ interface IJuryContract is IERC8004ValidationRegistry {
         uint256 totalVotes;
         uint256 positiveVotes;
         uint8 finalResponse;
+    }
+
+    /// @notice Extension data for context-aware tasks.
+    ///         Stored in a separate mapping; only written when at least one field is non-zero.
+    ///         Agent validation tasks (agentId != 0, no callback) pay zero gas for this struct.
+    struct TaskExtension {
+        bytes32 contextId;        // Generic subject ID (purchaseId for disputes, 0 for agent tasks)
+        bytes32 contextType;      // Semantic type tag (use CONTEXT_* constants)
+        address callbackAddress;  // ITaskCallback implementer (address(0) = no callback)
+        uint8 positiveThreshold;  // Score >= this counts as positive vote (0 = default 50)
     }
 
     /// @notice Juror vote record
@@ -89,6 +109,12 @@ interface IJuryContract is IERC8004ValidationRegistry {
     event JurorRegistered(address indexed juror, uint256 stakeAmount);
 
     event JurorUnregistered(address indexed juror, uint256 stakeReturned);
+
+    /// @notice Emitted when a task callback fails (callback failure does NOT affect finalization)
+    event TaskCallbackFailed(bytes32 indexed taskHash, address indexed callbackAddress);
+
+    /// @notice Emitted when a task callback is successfully called
+    event TaskCallbackCalled(bytes32 indexed taskHash, address indexed callbackAddress);
 
     // ====================================
     // Task Management
@@ -161,6 +187,13 @@ interface IJuryContract is IERC8004ValidationRegistry {
      * @return task Task data
      */
     function getTask(bytes32 taskHash) external view returns (Task memory task);
+
+    /**
+     * @notice Get extension data for a context-aware task
+     * @param taskHash Task hash
+     * @return ext Extension data (all zero for agent validation tasks)
+     */
+    function getTaskExtension(bytes32 taskHash) external view returns (TaskExtension memory ext);
 
     /**
      * @notice Get votes for task
