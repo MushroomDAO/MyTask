@@ -48,6 +48,24 @@ const HEADER_PAYMENT_REQUIRED = "Payment-Required";
 const HEADER_PAYMENT_SIGNATURE = "Payment-Signature";
 
 // ============================================================
+// Custom error types for unambiguous error classification
+// ============================================================
+
+class MissingPaymentError extends Error {
+  constructor() {
+    super("Missing Payment-Signature header");
+    this.name = "MissingPaymentError";
+  }
+}
+
+class InvalidPaymentError extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = "InvalidPaymentError";
+  }
+}
+
+// ============================================================
 // Receipt store — bounded LRU-like map (max 1000 entries)
 // Prevents unbounded memory growth.
 // ============================================================
@@ -63,6 +81,9 @@ interface Receipt {
 }
 
 const receipts = new Map<string, Receipt>();
+
+// Nonce replay protection — tracks consumed EIP-3009 nonces
+const usedNonces = new Set<string>();
 
 function storeReceipt(id: string, receipt: Receipt): void {
   if (receipts.size >= RECEIPT_MAX_SIZE) {
@@ -115,7 +136,7 @@ async function verifyPaymentSignature(
   header: string | undefined,
 ): Promise<Address> {
   if (!header || header.length === 0) {
-    throw new Error("Missing Payment-Signature header");
+    throw new MissingPaymentError();
   }
 
   // Decode base64 → JSON
@@ -124,7 +145,7 @@ async function verifyPaymentSignature(
     const decoded = Buffer.from(header, "base64").toString("utf-8");
     auth = JSON.parse(decoded) as Eip3009Auth;
   } catch {
-    throw new Error("Payment-Signature is not valid base64-encoded JSON");
+    throw new InvalidPaymentError("Payment-Signature is not valid base64-encoded JSON");
   }
 
   // Structural validation
@@ -139,40 +160,46 @@ async function verifyPaymentSignature(
   ];
   for (const field of requiredFields) {
     if (auth[field] === undefined || auth[field] === null) {
-      throw new Error(`Payment-Signature missing field: ${field}`);
+      throw new InvalidPaymentError(`Payment-Signature missing field: ${field}`);
     }
   }
 
-  if (!isAddress(auth.from)) throw new Error("auth.from is not a valid address");
-  if (!isAddress(auth.to)) throw new Error("auth.to is not a valid address");
+  if (!isAddress(auth.from)) throw new InvalidPaymentError("auth.from is not a valid address");
+  if (!isAddress(auth.to)) throw new InvalidPaymentError("auth.to is not a valid address");
   if (!isHex(auth.nonce) || auth.nonce.length !== 66) {
-    throw new Error("auth.nonce must be a 32-byte hex string (0x + 64 chars)");
+    throw new InvalidPaymentError("auth.nonce must be a 32-byte hex string (0x + 64 chars)");
   }
   if (!isHex(auth.signature) || auth.signature.length !== 132) {
-    throw new Error(
+    throw new InvalidPaymentError(
       "auth.signature must be a 65-byte hex string (0x + 130 chars)",
     );
   }
 
-  // Temporal validation
-  const nowSec = Math.floor(Date.now() / 1000);
-  const validAfter = Number(auth.validAfter);
-  const validBefore = Number(auth.validBefore);
+  // Nonce replay protection
+  const nonceKey = `${CHAIN_ID}:${REWARD_TOKEN.toLowerCase()}:${auth.nonce.toLowerCase()}`;
+  if (usedNonces.has(nonceKey)) {
+    throw new InvalidPaymentError(`Nonce already used: ${auth.nonce}`);
+  }
+
+  // Temporal validation — use BigInt to avoid Number precision issues with large timestamps
+  const nowSec = BigInt(Math.floor(Date.now() / 1000));
+  const validAfter = BigInt(auth.validAfter);
+  const validBefore = BigInt(auth.validBefore);
   if (nowSec <= validAfter) {
-    throw new Error("Payment authorization is not yet valid (validAfter)");
+    throw new InvalidPaymentError("Payment authorization is not yet valid (validAfter)");
   }
   if (nowSec >= validBefore) {
-    throw new Error("Payment authorization has expired (validBefore)");
+    throw new InvalidPaymentError("Payment authorization has expired (validBefore)");
   }
 
   // Verify the payment is directed to the correct recipient and amount
   if (auth.to.toLowerCase() !== PAY_TO.toLowerCase()) {
-    throw new Error(
+    throw new InvalidPaymentError(
       `Payment recipient mismatch: expected ${PAY_TO}, got ${auth.to}`,
     );
   }
   if (BigInt(auth.value) < TASK_FEE) {
-    throw new Error(
+    throw new InvalidPaymentError(
       `Insufficient payment: required ${TASK_FEE}, got ${auth.value}`,
     );
   }
@@ -191,18 +218,21 @@ async function verifyPaymentSignature(
       from: auth.from,
       to: auth.to,
       value: BigInt(auth.value),
-      validAfter: BigInt(auth.validAfter),
-      validBefore: BigInt(auth.validBefore),
+      validAfter,
+      validBefore,
       nonce: auth.nonce,
     },
     signature: auth.signature,
   });
 
   if (recovered.toLowerCase() !== auth.from.toLowerCase()) {
-    throw new Error(
+    throw new InvalidPaymentError(
       `Signature signer mismatch: recovered ${recovered}, expected ${auth.from}`,
     );
   }
+
+  // Mark nonce as consumed (only after all validation passes)
+  usedNonces.add(nonceKey);
 
   return auth.from as Address;
 }
@@ -284,18 +314,14 @@ app.post("/tasks", async (c) => {
   try {
     payer = await verifyPaymentSignature(paymentSigHeader);
   } catch (err: unknown) {
-    const isAuthError =
-      !paymentSigHeader ||
-      (err instanceof Error && err.message.includes("Missing"));
-
-    if (isAuthError) {
+    if (err instanceof MissingPaymentError) {
       // No signature at all → standard 402 flow
       const pr = buildPaymentRequired(TASK_FEE, "/tasks");
       c.header(HEADER_PAYMENT_REQUIRED, JSON.stringify(pr));
       return c.json({ error: "payment-required", details: pr }, 402);
     }
 
-    // Signature present but invalid → 400 (not 402) to distinguish bad sig from no sig
+    // Signature present but invalid → 400 to distinguish bad sig from no sig
     const message = err instanceof Error ? err.message : "invalid signature";
     return c.json({ error: "invalid-payment-signature", message }, 400);
   }
