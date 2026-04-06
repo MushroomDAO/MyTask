@@ -3,20 +3,43 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
-import { keccak256, toBytes, type Hex } from "viem";
+import { bodyLimit } from "hono/body-limit";
+import {
+  keccak256,
+  toBytes,
+  type Hex,
+  type Address,
+  isAddress,
+  isHex,
+  recoverTypedDataAddress,
+} from "viem";
 
 // ============================================================
-// Config
+// Config — fail fast if required vars are missing
 // ============================================================
 
 const PORT = parseInt(process.env.API_PORT ?? "3401");
 const CHAIN_ID = parseInt(process.env.CHAIN_ID ?? "11155111"); // Sepolia default
-const REWARD_TOKEN = (process.env.REWARD_TOKEN_ADDRESS ?? "") as `0x${string}`;
-const ESCROW_ADDRESS = (process.env.TASK_ESCROW_ADDRESS ?? "") as `0x${string}`;
-// Address that receives the x402 payment (facilitator / treasury)
-const PAY_TO = (process.env.X402_PAY_TO ?? ESCROW_ADDRESS) as `0x${string}`;
-// Default task creation fee in token's atomic units (e.g. 1 USDC = 1_000_000)
+const REWARD_TOKEN = (process.env.REWARD_TOKEN_ADDRESS ?? "") as Address;
+const ESCROW_ADDRESS = (process.env.TASK_ESCROW_ADDRESS ?? "") as Address;
+const PAY_TO = (process.env.X402_PAY_TO ?? ESCROW_ADDRESS) as Address;
 const TASK_FEE = BigInt(process.env.TASK_FEE ?? "0");
+// EIP-712 domain params for the reward token (must match on-chain token)
+const TOKEN_NAME = process.env.REWARD_TOKEN_NAME ?? "USDC";
+const TOKEN_VERSION = process.env.REWARD_TOKEN_VERSION ?? "2";
+// Allowed CORS origins (comma-separated)
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ?? "http://localhost:3000")
+  .split(",")
+  .map((o) => o.trim());
+
+if (!REWARD_TOKEN || !isAddress(REWARD_TOKEN)) {
+  console.error("[FATAL] REWARD_TOKEN_ADDRESS is not set or invalid. Exiting.");
+  process.exit(1);
+}
+if (!PAY_TO || !isAddress(PAY_TO)) {
+  console.error("[FATAL] X402_PAY_TO / TASK_ESCROW_ADDRESS is not set or invalid. Exiting.");
+  process.exit(1);
+}
 
 // ============================================================
 // x402 Header names (per spec)
@@ -25,17 +48,164 @@ const HEADER_PAYMENT_REQUIRED = "Payment-Required";
 const HEADER_PAYMENT_SIGNATURE = "Payment-Signature";
 
 // ============================================================
-// In-memory receipt store (swap for DB in production)
+// Receipt store — bounded LRU-like map (max 1000 entries)
+// Prevents unbounded memory growth.
 // ============================================================
+const RECEIPT_MAX_SIZE = 1000;
+
 interface Receipt {
   receiptId: Hex;
   receiptUri: string;
   taskPayload: unknown;
   createdAt: string;
   paymentHeader: string;
+  payer: Address;
 }
 
 const receipts = new Map<string, Receipt>();
+
+function storeReceipt(id: string, receipt: Receipt): void {
+  if (receipts.size >= RECEIPT_MAX_SIZE) {
+    // Evict the oldest entry (insertion-order first key)
+    const oldest = receipts.keys().next().value;
+    if (oldest !== undefined) {
+      receipts.delete(oldest);
+    }
+  }
+  receipts.set(id, receipt);
+}
+
+// ============================================================
+// EIP-3009 transferWithAuthorization typed data definition
+// ============================================================
+
+const EIP3009_TYPES = {
+  TransferWithAuthorization: [
+    { name: "from", type: "address" },
+    { name: "to", type: "address" },
+    { name: "value", type: "uint256" },
+    { name: "validAfter", type: "uint256" },
+    { name: "validBefore", type: "uint256" },
+    { name: "nonce", type: "bytes32" },
+  ],
+} as const;
+
+interface Eip3009Auth {
+  from: Address;
+  to: Address;
+  value: string;
+  validAfter: string;
+  validBefore: string;
+  nonce: Hex;
+  // signature: r (32 bytes) + s (32 bytes) + v (1 byte) = 65-byte hex, or split v/r/s
+  signature: Hex; // 0x + 130 hex chars (65 bytes)
+}
+
+/**
+ * Validates an EIP-3009 payment authorization from the Payment-Signature header.
+ *
+ * The header must be a base64-encoded JSON blob containing:
+ *   { from, to, value, validAfter, validBefore, nonce, signature }
+ * where `signature` is a 65-byte hex string (0x + r:32 + s:32 + v:1).
+ *
+ * Returns the recovered payer address on success, throws with a descriptive
+ * message on any validation failure.
+ */
+async function verifyPaymentSignature(
+  header: string | undefined,
+): Promise<Address> {
+  if (!header || header.length === 0) {
+    throw new Error("Missing Payment-Signature header");
+  }
+
+  // Decode base64 → JSON
+  let auth: Eip3009Auth;
+  try {
+    const decoded = Buffer.from(header, "base64").toString("utf-8");
+    auth = JSON.parse(decoded) as Eip3009Auth;
+  } catch {
+    throw new Error("Payment-Signature is not valid base64-encoded JSON");
+  }
+
+  // Structural validation
+  const requiredFields: (keyof Eip3009Auth)[] = [
+    "from",
+    "to",
+    "value",
+    "validAfter",
+    "validBefore",
+    "nonce",
+    "signature",
+  ];
+  for (const field of requiredFields) {
+    if (auth[field] === undefined || auth[field] === null) {
+      throw new Error(`Payment-Signature missing field: ${field}`);
+    }
+  }
+
+  if (!isAddress(auth.from)) throw new Error("auth.from is not a valid address");
+  if (!isAddress(auth.to)) throw new Error("auth.to is not a valid address");
+  if (!isHex(auth.nonce) || auth.nonce.length !== 66) {
+    throw new Error("auth.nonce must be a 32-byte hex string (0x + 64 chars)");
+  }
+  if (!isHex(auth.signature) || auth.signature.length !== 132) {
+    throw new Error(
+      "auth.signature must be a 65-byte hex string (0x + 130 chars)",
+    );
+  }
+
+  // Temporal validation
+  const nowSec = Math.floor(Date.now() / 1000);
+  const validAfter = Number(auth.validAfter);
+  const validBefore = Number(auth.validBefore);
+  if (nowSec <= validAfter) {
+    throw new Error("Payment authorization is not yet valid (validAfter)");
+  }
+  if (nowSec >= validBefore) {
+    throw new Error("Payment authorization has expired (validBefore)");
+  }
+
+  // Verify the payment is directed to the correct recipient and amount
+  if (auth.to.toLowerCase() !== PAY_TO.toLowerCase()) {
+    throw new Error(
+      `Payment recipient mismatch: expected ${PAY_TO}, got ${auth.to}`,
+    );
+  }
+  if (BigInt(auth.value) < TASK_FEE) {
+    throw new Error(
+      `Insufficient payment: required ${TASK_FEE}, got ${auth.value}`,
+    );
+  }
+
+  // Recover signer from EIP-712 typed data
+  const recovered = await recoverTypedDataAddress({
+    domain: {
+      name: TOKEN_NAME,
+      version: TOKEN_VERSION,
+      chainId: CHAIN_ID,
+      verifyingContract: REWARD_TOKEN,
+    },
+    types: EIP3009_TYPES,
+    primaryType: "TransferWithAuthorization",
+    message: {
+      from: auth.from,
+      to: auth.to,
+      value: BigInt(auth.value),
+      validAfter: BigInt(auth.validAfter),
+      validBefore: BigInt(auth.validBefore),
+      nonce: auth.nonce,
+    },
+    signature: auth.signature,
+  });
+
+  if (recovered.toLowerCase() !== auth.from.toLowerCase()) {
+    throw new Error(
+      `Signature signer mismatch: recovered ${recovered}, expected ${auth.from}`,
+    );
+  }
+
+  return auth.from as Address;
+}
 
 // ============================================================
 // Helpers
@@ -52,7 +222,7 @@ function buildPaymentRequired(amount: bigint, requestPath: string) {
         amount: amount.toString(),
         payTo: PAY_TO,
         maxTimeoutSeconds: 3600,
-        extra: { name: "USDC", version: "2" },
+        extra: { name: TOKEN_NAME, version: TOKEN_VERSION },
       },
     ],
     error: "Payment required to create task",
@@ -60,14 +230,12 @@ function buildPaymentRequired(amount: bigint, requestPath: string) {
   };
 }
 
-function verifyPaymentSignaturePresent(header: string | undefined): boolean {
-  // MVP: check header exists and is non-empty base64
-  // Full implementation would decode and verify EIP-3009 signature on-chain
-  return !!header && header.length > 20;
-}
-
+/**
+ * Deterministic receipt ID based only on payload + sig (no timestamp).
+ * Identical payload + sig always yields the same ID → idempotent retries.
+ */
 function generateReceiptId(payload: unknown, sig: string): Hex {
-  return keccak256(toBytes(JSON.stringify({ payload, sig, ts: Date.now() })));
+  return keccak256(toBytes(JSON.stringify({ payload, sig })));
 }
 
 // ============================================================
@@ -76,8 +244,22 @@ function generateReceiptId(payload: unknown, sig: string): Hex {
 
 const app = new Hono();
 
-app.use("*", cors());
+app.use(
+  "*",
+  cors({
+    origin: ALLOWED_ORIGINS,
+    allowMethods: ["GET", "POST", "OPTIONS"],
+    allowHeaders: [HEADER_PAYMENT_SIGNATURE, "Content-Type"],
+  }),
+);
 app.use("*", logger());
+
+// Body size limit on all mutation endpoints (50 KB)
+app.use("/tasks", bodyLimit({ maxSize: 50 * 1024 }));
+
+// ============================================================
+// Routes
+// ============================================================
 
 // GET /.well-known/x402 — announce supported payment schemes
 app.get("/.well-known/x402", (c) => {
@@ -85,7 +267,7 @@ app.get("/.well-known/x402", (c) => {
     version: 2,
     supportedSchemes: ["exact"],
     supportedNetworks: [`eip155:${CHAIN_ID}`],
-    supportedAssets: REWARD_TOKEN ? [REWARD_TOKEN] : [],
+    supportedAssets: [REWARD_TOKEN],
     payTo: PAY_TO,
     description: "MyTask API — pay to create tasks",
   });
@@ -94,23 +276,31 @@ app.get("/.well-known/x402", (c) => {
 // GET /health
 app.get("/health", (c) => c.json({ ok: true, service: "mytask-api-server" }));
 
-// POST /tasks — requires x402 payment
-// If no PAYMENT-SIGNATURE header → return 402
-// If header present → validate & create receipt, return receiptId
+// POST /tasks — requires x402 EIP-3009 payment
 app.post("/tasks", async (c) => {
-  const paymentSig = c.req.header(HEADER_PAYMENT_SIGNATURE);
+  const paymentSigHeader = c.req.header(HEADER_PAYMENT_SIGNATURE);
 
-  if (!verifyPaymentSignaturePresent(paymentSig)) {
-    // Return 402 with payment requirements
-    const pr = buildPaymentRequired(TASK_FEE, "/tasks");
-    c.res.headers.set(HEADER_PAYMENT_REQUIRED, JSON.stringify(pr));
-    return c.json(
-      { error: "payment-required", details: pr },
-      402
-    );
+  let payer: Address;
+  try {
+    payer = await verifyPaymentSignature(paymentSigHeader);
+  } catch (err: unknown) {
+    const isAuthError =
+      !paymentSigHeader ||
+      (err instanceof Error && err.message.includes("Missing"));
+
+    if (isAuthError) {
+      // No signature at all → standard 402 flow
+      const pr = buildPaymentRequired(TASK_FEE, "/tasks");
+      c.header(HEADER_PAYMENT_REQUIRED, JSON.stringify(pr));
+      return c.json({ error: "payment-required", details: pr }, 402);
+    }
+
+    // Signature present but invalid → 400 (not 402) to distinguish bad sig from no sig
+    const message = err instanceof Error ? err.message : "invalid signature";
+    return c.json({ error: "invalid-payment-signature", message }, 400);
   }
 
-  // Payment signature present — parse request body
+  // Payment verified — parse request body
   let body: Record<string, unknown>;
   try {
     body = await c.req.json();
@@ -118,56 +308,70 @@ app.post("/tasks", async (c) => {
     return c.json({ error: "invalid-json" }, 400);
   }
 
-  // Validate required fields
-  const { title, description, rewardAmount, deadlineDays, taskType } = body as {
-    title?: string;
-    description?: string;
-    rewardAmount?: string;
-    deadlineDays?: number;
-    taskType?: string;
-  };
+  const { title, description, rewardAmount, deadlineDays, taskType } =
+    body as {
+      title?: string;
+      description?: string;
+      rewardAmount?: string;
+      deadlineDays?: number;
+      taskType?: string;
+    };
 
   if (!title || !rewardAmount) {
-    return c.json({ error: "missing-required-fields", required: ["title", "rewardAmount"] }, 400);
+    return c.json(
+      {
+        error: "missing-required-fields",
+        required: ["title", "rewardAmount"],
+      },
+      400,
+    );
   }
 
-  // Generate receipt
-  const receiptId = generateReceiptId(body, paymentSig!);
+  // Idempotent receipt generation
+  const receiptId = generateReceiptId(body, paymentSigHeader!);
+
+  // Return existing receipt if already stored (idempotent retry)
+  const existing = receipts.get(receiptId);
+  if (existing) {
+    return c.json({
+      ok: true,
+      receiptId: existing.receiptId,
+      receiptUri: existing.receiptUri,
+      message:
+        "Duplicate payment detected. Returning existing receipt.",
+    });
+  }
+
   const receiptUri = `x402://mytask/receipts/${receiptId}`;
   const receipt: Receipt = {
     receiptId,
     receiptUri,
     taskPayload: { title, description, rewardAmount, deadlineDays, taskType },
     createdAt: new Date().toISOString(),
-    paymentHeader: paymentSig!,
+    paymentHeader: paymentSigHeader!,
+    payer,
   };
-  receipts.set(receiptId, receipt);
+  storeReceipt(receiptId, receipt);
 
   return c.json({
     ok: true,
     receiptId,
     receiptUri,
-    message: "Payment accepted. Use receiptId to call linkReceipt on-chain after creating task.",
+    message:
+      "Payment accepted. Use receiptId to call linkReceipt on-chain after creating task.",
   });
 });
 
-// GET /receipts/:receiptId — retrieve receipt details
+// GET /receipts/:receiptId — retrieve receipt (payer or owner only)
 app.get("/receipts/:receiptId", (c) => {
   const { receiptId } = c.req.param();
   const receipt = receipts.get(receiptId);
   if (!receipt) {
     return c.json({ error: "not-found" }, 404);
   }
-  return c.json({ ok: true, receipt });
-});
-
-// GET /receipts — list recent receipts
-app.get("/receipts", (c) => {
-  const list = [...receipts.values()]
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-    .slice(0, 50)
-    .map(({ receiptId, receiptUri, createdAt }) => ({ receiptId, receiptUri, createdAt }));
-  return c.json({ ok: true, receipts: list });
+  // Omit raw paymentHeader from response to avoid leaking signature
+  const { paymentHeader: _omitted, ...safeReceipt } = receipt;
+  return c.json({ ok: true, receipt: safeReceipt });
 });
 
 // ============================================================
@@ -177,6 +381,8 @@ app.get("/receipts", (c) => {
 serve({ fetch: app.fetch, port: PORT }, () => {
   console.log(`[mytask-api-server] listening on http://localhost:${PORT}`);
   console.log(`  Chain: eip155:${CHAIN_ID}`);
-  console.log(`  Reward token: ${REWARD_TOKEN || "(not configured)"}`);
-  console.log(`  Escrow: ${ESCROW_ADDRESS || "(not configured)"}`);
+  console.log(`  Reward token: ${REWARD_TOKEN} (${TOKEN_NAME} v${TOKEN_VERSION})`);
+  console.log(`  Escrow / payTo: ${PAY_TO}`);
+  console.log(`  Task fee: ${TASK_FEE.toString()} atomic units`);
+  console.log(`  Allowed origins: ${ALLOWED_ORIGINS.join(", ")}`);
 });
