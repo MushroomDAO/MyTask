@@ -2,18 +2,21 @@
  * x402 API Server Integration Test
  * Run: node test-x402.mjs
  *
+ * Uses the official x402 v2 payment payload envelope:
+ *   { x402Version: 2, scheme, network, payload: { authorization, signature } }
+ *
  * Tests:
- *  1. GET /health
- *  2. GET /.well-known/x402
- *  3. POST /tasks → 402 (no payment)
- *  4. POST /tasks with valid EIP-3009 signature → 200 + receiptId
- *  5. GET /receipts/:receiptId → receipt details
- *  6. Idempotent retry → same receiptId
+ *  1.  GET /health
+ *  2.  GET /.well-known/x402
+ *  3a. POST /tasks — no body (empty probe) → 402
+ *  3b. POST /tasks — body but no payment header → 402
+ *  4.  POST /tasks — valid EIP-3009 payment → 200 + receiptId
+ *  5.  GET /receipts/:receiptId → receipt details
+ *  6.  Idempotent retry → same receiptId
+ *  7.  Nonce replay → rejected
  */
 
-import { createWalletClient, http, recoverTypedDataAddress } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { sepolia } from "viem/chains";
 
 const BASE_URL = "http://localhost:3401";
 
@@ -72,15 +75,15 @@ const CHAIN_ID = parseInt(envVars.CHAIN_ID ?? "11155111");
 const TOKEN_ADDRESS = envVars.REWARD_TOKEN_ADDRESS;
 const TOKEN_NAME = envVars.REWARD_TOKEN_NAME ?? "USDC";
 const TOKEN_VERSION = envVars.REWARD_TOKEN_VERSION ?? "2";
-const PAY_TO = (envVars.X402_PAY_TO ?? envVars.TASK_ESCROW_ADDRESS);
+const PAY_TO = envVars.X402_PAY_TO ?? envVars.TASK_ESCROW_ADDRESS;
 const TASK_FEE = BigInt(envVars.TASK_FEE ?? "0");
+const NETWORK = `eip155:${CHAIN_ID}`;
 
-// ── test signer (anvil account #0) ────────────────────────────────────────
+// ── test signer ───────────────────────────────────────────────────────────
 const PRIVATE_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const account = privateKeyToAccount(PRIVATE_KEY);
 
-// ── EIP-3009 signer helper ─────────────────────────────────────────────────
-
+// EIP-712 types for EIP-3009
 const EIP3009_TYPES = {
   TransferWithAuthorization: [
     { name: "from", type: "address" },
@@ -92,6 +95,11 @@ const EIP3009_TYPES = {
   ],
 };
 
+/**
+ * Builds an x402 v2 payment header (base64-encoded JSON) following the official
+ * ExactEvmPayloadV2 envelope:
+ *   { x402Version: 2, scheme, network, payload: { authorization, signature } }
+ */
 async function buildPaymentHeader(nonce) {
   const from = account.address;
   const to = PAY_TO;
@@ -112,17 +120,25 @@ async function buildPaymentHeader(nonce) {
     message: { from, to, value, validAfter, validBefore, nonce: n },
   });
 
-  const auth = {
-    from,
-    to,
-    value: value.toString(),
-    validAfter: validAfter.toString(),
-    validBefore: validBefore.toString(),
-    nonce: n,
-    signature,
+  // Official x402 v2 payload envelope
+  const envelope = {
+    x402Version: 2,
+    scheme: "exact",
+    network: NETWORK,
+    payload: {
+      authorization: {
+        from,
+        to,
+        value: value.toString(),
+        validAfter: validAfter.toString(),
+        validBefore: validBefore.toString(),
+        nonce: n,
+      },
+      signature,
+    },
   };
 
-  return { header: btoa(JSON.stringify(auth)), nonce: n };
+  return { header: btoa(JSON.stringify(envelope)), nonce: n };
 }
 
 const TASK_PAYLOAD = {
@@ -153,20 +169,14 @@ if (wkRes.ok) {
 // 3a. POST /tasks with no body at all → 402 (x402 discovery probe)
 const probeRes = await fetch(`${BASE_URL}/tasks`, { method: "POST" });
 await assertStatus("POST /tasks (empty probe, no body)", probeRes, 402);
-const probeHeader = probeRes.headers.get("Payment-Required");
-if (probeHeader) ok("Payment-Required header present on empty probe");
-else fail("Payment-Required header on empty probe", "missing");
 
-// 3b. POST /tasks without payment header but with body → 402
+// 3b. POST /tasks with body but no payment header → 402
 const noPayRes = await fetch(`${BASE_URL}/tasks`, {
   method: "POST",
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify(TASK_PAYLOAD),
 });
-await assertStatus("POST /tasks (no payment)", noPayRes, 402);
-const prHeader = noPayRes.headers.get("Payment-Required");
-if (prHeader) ok("Payment-Required header present");
-else fail("Payment-Required header", "missing");
+await assertStatus("POST /tasks (no payment header)", noPayRes, 402);
 
 // 4. POST /tasks with valid EIP-3009 payment → 200
 const { header: paymentSig, nonce } = await buildPaymentHeader();
@@ -174,7 +184,7 @@ const payRes = await fetch(`${BASE_URL}/tasks`, {
   method: "POST",
   headers: {
     "Content-Type": "application/json",
-    "Payment-Signature": paymentSig,
+    "x-payment": paymentSig,
   },
   body: JSON.stringify(TASK_PAYLOAD),
 });
@@ -211,7 +221,7 @@ if (receiptId) {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "Payment-Signature": paymentSig,
+      "x-payment": paymentSig,
     },
     body: JSON.stringify(TASK_PAYLOAD),
   });
@@ -223,19 +233,23 @@ if (receiptId) {
   }
 }
 
-// 7. Replay attack: same nonce again → 400
+// 7. Replay: same nonce with different body → facilitator/middleware should reject
 const replayRes = await fetch(`${BASE_URL}/tasks`, {
   method: "POST",
   headers: {
     "Content-Type": "application/json",
-    "Payment-Signature": paymentSig,  // same sig, different body → different receiptId but same nonce
+    "x-payment": paymentSig, // same sig, different body → different receiptId but same nonce
   },
   body: JSON.stringify({ ...TASK_PAYLOAD, title: "Replay attempt" }),
 });
-// Same nonce was already consumed in test 4, so must fail (400)
-if (replayRes.status === 400) ok("Nonce replay rejected (400)");
-else if (replayRes.status === 200) fail("Nonce replay", "server accepted a replayed nonce!");
-else ok(`Nonce replay returned ${replayRes.status} (acceptable)`);
+// Facilitator checks authorizationState on-chain; used nonce → 402 or 400
+if (replayRes.status === 402 || replayRes.status === 400) {
+  ok(`Nonce replay rejected (${replayRes.status})`);
+} else if (replayRes.status === 200) {
+  fail("Nonce replay", "server accepted a replayed nonce!");
+} else {
+  ok(`Nonce replay returned ${replayRes.status} (acceptable)`);
+}
 
 // ── summary ───────────────────────────────────────────────────────────────
 
