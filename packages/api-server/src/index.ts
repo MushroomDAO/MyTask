@@ -280,6 +280,8 @@ app.use(
     origin: ALLOWED_ORIGINS,
     allowMethods: ["GET", "POST", "OPTIONS"],
     allowHeaders: [HEADER_PAYMENT_SIGNATURE, "Content-Type"],
+    // Expose custom response headers so browsers can read them in cross-origin requests
+    exposeHeaders: [HEADER_PAYMENT_REQUIRED],
   }),
 );
 app.use("*", logger());
@@ -310,6 +312,33 @@ app.get("/health", (c) => c.json({ ok: true, service: "mytask-api-server" }));
 app.post("/tasks", async (c) => {
   const paymentSigHeader = c.req.header(HEADER_PAYMENT_SIGNATURE);
 
+  // Parse body first — needed for idempotency check before nonce validation
+  let body: Record<string, unknown>;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "invalid-json" }, 400);
+  }
+
+  // Idempotency check BEFORE nonce validation:
+  // If the exact same (payload + sig) was already processed, return the stored
+  // receipt immediately without re-running the nonce check. This allows the
+  // client to safely retry after a network error without being blocked by
+  // "nonce already used".
+  if (paymentSigHeader) {
+    const potentialReceiptId = generateReceiptId(body, paymentSigHeader);
+    const existing = receipts.get(potentialReceiptId);
+    if (existing) {
+      return c.json({
+        ok: true,
+        receiptId: existing.receiptId,
+        receiptUri: existing.receiptUri,
+        message: "Duplicate payment detected. Returning existing receipt.",
+      });
+    }
+  }
+
+  // Full payment verification (signature recovery + nonce check)
   let payer: Address;
   try {
     payer = await verifyPaymentSignature(paymentSigHeader);
@@ -324,14 +353,6 @@ app.post("/tasks", async (c) => {
     // Signature present but invalid → 400 to distinguish bad sig from no sig
     const message = err instanceof Error ? err.message : "invalid signature";
     return c.json({ error: "invalid-payment-signature", message }, 400);
-  }
-
-  // Payment verified — parse request body
-  let body: Record<string, unknown>;
-  try {
-    body = await c.req.json();
-  } catch {
-    return c.json({ error: "invalid-json" }, 400);
   }
 
   const { title, description, rewardAmount, deadlineDays, taskType } =
@@ -353,21 +374,7 @@ app.post("/tasks", async (c) => {
     );
   }
 
-  // Idempotent receipt generation
   const receiptId = generateReceiptId(body, paymentSigHeader!);
-
-  // Return existing receipt if already stored (idempotent retry)
-  const existing = receipts.get(receiptId);
-  if (existing) {
-    return c.json({
-      ok: true,
-      receiptId: existing.receiptId,
-      receiptUri: existing.receiptUri,
-      message:
-        "Duplicate payment detected. Returning existing receipt.",
-    });
-  }
-
   const receiptUri = `x402://mytask/receipts/${receiptId}`;
   const receipt: Receipt = {
     receiptId,
