@@ -150,7 +150,14 @@ if (wkRes.ok) {
   else fail(".well-known scheme", `got ${JSON.stringify(wk.supportedSchemes)}`);
 }
 
-// 3. POST /tasks without payment → 402
+// 3a. POST /tasks with no body at all → 402 (x402 discovery probe)
+const probeRes = await fetch(`${BASE_URL}/tasks`, { method: "POST" });
+await assertStatus("POST /tasks (empty probe, no body)", probeRes, 402);
+const probeHeader = probeRes.headers.get("Payment-Required");
+if (probeHeader) ok("Payment-Required header present on empty probe");
+else fail("Payment-Required header on empty probe", "missing");
+
+// 3b. POST /tasks without payment header but with body → 402
 const noPayRes = await fetch(`${BASE_URL}/tasks`, {
   method: "POST",
   headers: { "Content-Type": "application/json" },

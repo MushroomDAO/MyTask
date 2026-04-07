@@ -78,6 +78,7 @@ interface Receipt {
   createdAt: string;
   paymentHeader: string;
   payer: Address;
+  nonceKey: string;
 }
 
 const receipts = new Map<string, Receipt>();
@@ -90,6 +91,8 @@ function storeReceipt(id: string, receipt: Receipt): void {
     // Evict the oldest entry (insertion-order first key)
     const oldest = receipts.keys().next().value;
     if (oldest !== undefined) {
+      const evicted = receipts.get(oldest);
+      if (evicted) usedNonces.delete(evicted.nonceKey);
       receipts.delete(oldest);
     }
   }
@@ -312,7 +315,16 @@ app.get("/health", (c) => c.json({ ok: true, service: "mytask-api-server" }));
 app.post("/tasks", async (c) => {
   const paymentSigHeader = c.req.header(HEADER_PAYMENT_SIGNATURE);
 
-  // Parse body first — needed for idempotency check before nonce validation
+  // No signature → 402 immediately (standard x402 discovery flow).
+  // Must happen before body parsing so clients probing without a body
+  // (or with an empty body) still receive 402, not 400.
+  if (!paymentSigHeader) {
+    const pr = buildPaymentRequired(TASK_FEE, "/tasks");
+    c.header(HEADER_PAYMENT_REQUIRED, JSON.stringify(pr));
+    return c.json({ error: "payment-required", details: pr }, 402);
+  }
+
+  // Parse body — only reached when a signature header is present
   let body: Record<string, unknown>;
   try {
     body = await c.req.json();
@@ -325,17 +337,15 @@ app.post("/tasks", async (c) => {
   // receipt immediately without re-running the nonce check. This allows the
   // client to safely retry after a network error without being blocked by
   // "nonce already used".
-  if (paymentSigHeader) {
-    const potentialReceiptId = generateReceiptId(body, paymentSigHeader);
-    const existing = receipts.get(potentialReceiptId);
-    if (existing) {
-      return c.json({
-        ok: true,
-        receiptId: existing.receiptId,
-        receiptUri: existing.receiptUri,
-        message: "Duplicate payment detected. Returning existing receipt.",
-      });
-    }
+  const potentialReceiptId = generateReceiptId(body, paymentSigHeader);
+  const existing = receipts.get(potentialReceiptId);
+  if (existing) {
+    return c.json({
+      ok: true,
+      receiptId: existing.receiptId,
+      receiptUri: existing.receiptUri,
+      message: "Duplicate payment detected. Returning existing receipt.",
+    });
   }
 
   // Full payment verification (signature recovery + nonce check)
@@ -343,13 +353,6 @@ app.post("/tasks", async (c) => {
   try {
     payer = await verifyPaymentSignature(paymentSigHeader);
   } catch (err: unknown) {
-    if (err instanceof MissingPaymentError) {
-      // No signature at all → standard 402 flow
-      const pr = buildPaymentRequired(TASK_FEE, "/tasks");
-      c.header(HEADER_PAYMENT_REQUIRED, JSON.stringify(pr));
-      return c.json({ error: "payment-required", details: pr }, 402);
-    }
-
     // Signature present but invalid → 400 to distinguish bad sig from no sig
     const message = err instanceof Error ? err.message : "invalid signature";
     return c.json({ error: "invalid-payment-signature", message }, 400);
@@ -374,15 +377,20 @@ app.post("/tasks", async (c) => {
     );
   }
 
-  const receiptId = generateReceiptId(body, paymentSigHeader!);
+  const receiptId = generateReceiptId(body, paymentSigHeader);
   const receiptUri = `x402://mytask/receipts/${receiptId}`;
+  // Derive the nonceKey so it can be cleaned up when this receipt is evicted
+  const nonceKey = `${CHAIN_ID}:${REWARD_TOKEN.toLowerCase()}:${
+    (JSON.parse(Buffer.from(paymentSigHeader, "base64").toString("utf-8")) as { nonce: string }).nonce.toLowerCase()
+  }`;
   const receipt: Receipt = {
     receiptId,
     receiptUri,
     taskPayload: { title, description, rewardAmount, deadlineDays, taskType },
     createdAt: new Date().toISOString(),
-    paymentHeader: paymentSigHeader!,
+    paymentHeader: paymentSigHeader,
     payer,
+    nonceKey,
   };
   storeReceipt(receiptId, receipt);
 
