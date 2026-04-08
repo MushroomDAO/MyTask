@@ -71,7 +71,7 @@ try {
   process.exit(1);
 }
 
-const CHAIN_ID = parseInt(envVars.CHAIN_ID ?? "11155111");
+const CHAIN_ID = parseInt(envVars.CHAIN_ID ?? "84532");
 const TOKEN_ADDRESS = envVars.REWARD_TOKEN_ADDRESS;
 const TOKEN_NAME = envVars.REWARD_TOKEN_NAME ?? "USDC";
 const TOKEN_VERSION = envVars.REWARD_TOKEN_VERSION ?? "2";
@@ -233,22 +233,28 @@ if (receiptId) {
   }
 }
 
-// 7. Replay: same nonce with different body → facilitator/middleware should reject
-const replayRes = await fetch(`${BASE_URL}/tasks`, {
-  method: "POST",
-  headers: {
-    "Content-Type": "application/json",
-    "x-payment": paymentSig, // same sig, different body → different receiptId but same nonce
-  },
-  body: JSON.stringify({ ...TASK_PAYLOAD, title: "Replay attempt" }),
-});
-// Facilitator checks authorizationState on-chain; used nonce → 402 or 400
-if (replayRes.status === 402 || replayRes.status === 400) {
-  ok(`Nonce replay rejected (${replayRes.status})`);
-} else if (replayRes.status === 200) {
-  fail("Nonce replay", "server accepted a replayed nonce!");
-} else {
-  ok(`Nonce replay returned ${replayRes.status} (acceptable)`);
+// 7. Replay: same nonce with different body → idempotency middleware intercepts before
+// reaching the facilitator. Returns the original receipt (200) rather than creating a
+// new task for the replay body. This is the correct behavior: the payment sig is the
+// idempotency key, so any reuse of the same sig returns the original receipt.
+if (receiptId) {
+  const replayRes = await fetch(`${BASE_URL}/tasks`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-payment": paymentSig, // same sig, different body
+    },
+    body: JSON.stringify({ ...TASK_PAYLOAD, title: "Replay attempt" }),
+  });
+  await assertStatus("POST /tasks (replay same sig, different body)", replayRes, 200);
+  if (replayRes.ok) {
+    const d = await replayRes.json();
+    if (d.receiptId === receiptId) {
+      ok("Replay returned original receipt (idempotency pre-check, facilitator not called)");
+    } else {
+      fail("Replay protection", `expected original receiptId but got ${d.receiptId}`);
+    }
+  }
 }
 
 // ── summary ───────────────────────────────────────────────────────────────
