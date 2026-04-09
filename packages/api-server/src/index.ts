@@ -33,6 +33,14 @@ if (!PAY_TO || !isAddress(PAY_TO)) {
   process.exit(1);
 }
 
+let TASK_FEE: bigint;
+try {
+  TASK_FEE = BigInt(TASK_FEE_STR);
+} catch {
+  console.error(`[FATAL] TASK_FEE="${TASK_FEE_STR}" is not a valid integer. Exiting.`);
+  process.exit(1);
+}
+
 // ============================================================
 // Receipt store — bounded FIFO map (max 1000 entries)
 // ============================================================
@@ -120,6 +128,11 @@ const resourceServer = new x402ResourceServer(facilitatorClient).register(
 // Solution: intercept retried requests here (before paymentMiddleware) using the payment
 // signature as the idempotency key. The EIP-3009 authorization is a unique one-time
 // commitment, so the signature alone identifies the payment unambiguously.
+//
+// Note: a concurrent retry with the same sig will pass this check (receipt not yet stored)
+// and hit paymentMiddleware, but the facilitator will reject it — the on-chain nonce can
+// only be consumed once. No double-spend is possible; the race only occurs in the retry
+// scenario, which is inherently rare.
 app.use("/tasks", async (c, next) => {
   if (c.req.method !== "POST") return next();
   const paymentHeader =
@@ -147,7 +160,7 @@ app.use(
           scheme: "exact",
           // AssetAmount format: specify token contract + atomic units directly
           // This bypasses USD conversion and works with any ERC-20
-          price: { amount: BigInt(TASK_FEE_STR), asset: REWARD_TOKEN },
+          price: { amount: TASK_FEE, asset: REWARD_TOKEN },
           network: `eip155:${CHAIN_ID}` as `eip155:${number}`,
           payTo: PAY_TO,
         },
