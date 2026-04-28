@@ -364,13 +364,13 @@ Built upon research from:
 
 ## License
 
-MIT License - Open source and permissionless.
+Apache 2.0 — see [LICENSE](./LICENSE) and [NOTICE](./NOTICE).
 
 ---
 
 # MyTask (中文版)
 
-[![许可证: MIT](https://img.shields.io/badge/许可证-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![许可证: Apache 2.0](https://img.shields.io/badge/许可证-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Solidity](https://img.shields.io/badge/Solidity-0.8.23-blue.svg)](https://soliditylang.org/)
 [![Foundry](https://img.shields.io/badge/构建工具-Foundry-FFDB1C.svg)](https://getfoundry.sh/)
 [![x402](https://img.shields.io/badge/协议-x402-purple.svg)](https://www.x402.org/)
@@ -633,4 +633,4 @@ forge script script/Deploy.s.sol --rpc-url localhost:8545
 
 ## 许可证
 
-MIT 许可证 - 开源且无许可限制。
+Apache 2.0 — 见 [LICENSE](./LICENSE)（英文原版）及 [LICENSE-zh.md](./LICENSE-zh.md)（中文参考译本）。
