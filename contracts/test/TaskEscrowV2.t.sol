@@ -386,6 +386,87 @@ contract TaskEscrowV2Test is Test {
         assertEq(stakingToken.balanceOf(address(escrow)), 0);
     }
 
+    function test_ChallengeFlow_FeeOnTransferStake_RecordsActualAmount_AndResolves() public {
+        // F2: with a fee-on-transfer stake token, challengeStake must be the
+        // amount actually received — otherwise the refund would exceed the
+        // escrow's real balance and linkJuryValidation would revert forever
+        FeeOnTransferTokenMock feeToken = new FeeOnTransferTokenMock();
+        escrow.setChallengeStakeConfig(address(feeToken), CHALLENGE_STAKE);
+
+        feeToken.mint(community, CHALLENGE_STAKE);
+        vm.prank(community);
+        feeToken.approve(address(escrow), type(uint256).max);
+
+        bytes32 taskId = _createSubmittedTask();
+
+        vm.prank(community);
+        escrow.challengeWork(taskId);
+
+        // 10% fee burned in transit: escrow received and booked 9e18, not 10e18
+        uint256 received = CHALLENGE_STAKE - (CHALLENGE_STAKE * feeToken.FEE_BPS()) / 10000;
+        TaskEscrowV2.Task memory task = escrow.getTask(taskId);
+        assertEq(task.challengeStake, received);
+        assertEq(feeToken.balanceOf(address(escrow)), received);
+
+        // Jury approves the work -> refund path must NOT revert
+        bytes32 juryTaskHash = _completeJuryTask(80, 90, 85, 0);
+        escrow.linkJuryValidation(taskId, juryTaskHash);
+
+        task = escrow.getTask(taskId);
+        assertEq(uint256(task.status), uint256(TaskEscrowV2.TaskStatus.Finalized));
+
+        // Escrow fully paid out its real balance; challenger got received minus
+        // the outbound transfer fee
+        assertEq(feeToken.balanceOf(address(escrow)), 0);
+        assertEq(feeToken.balanceOf(community), received - (received * feeToken.FEE_BPS()) / 10000);
+    }
+
+    function test_ChallengeFlow_ConfigChangeMidChallenge_UsesSnapshotToken() public {
+        bytes32 taskId = _createSubmittedTask();
+
+        // Challenge with the original stake token (xPNT)
+        vm.prank(community);
+        escrow.challengeWork(taskId);
+
+        // Owner switches the stake config mid-challenge
+        ERC20Mock newToken = new ERC20Mock("PNT2", "PNT2", 18);
+        escrow.setChallengeStakeConfig(address(newToken), 99e18);
+
+        uint256 taskorStakeBefore = stakingToken.balanceOf(taskor);
+
+        // Jury rejects the work -> forfeit must use the SNAPSHOT token (xPNT),
+        // with the snapshot amount, not the new config
+        bytes32 juryTaskHash = _completeJuryTask(10, 10, 10, 5);
+        escrow.linkJuryValidation(taskId, juryTaskHash);
+
+        assertEq(stakingToken.balanceOf(taskor), taskorStakeBefore + CHALLENGE_STAKE);
+        assertEq(stakingToken.balanceOf(address(escrow)), 0);
+        assertEq(newToken.balanceOf(taskor), 0);
+        assertEq(newToken.balanceOf(address(escrow)), 0);
+    }
+
+    function test_AutoFinalize_UnchallengedJuryShare_AccruesAsOwnerDust() public {
+        // juryTaskHash == 0 path: unchallenged settlement must not revert, and
+        // the jury share (no voters to split among) accrues as ownerDust
+        bytes32 taskId = _createSubmittedTask();
+
+        vm.warp(block.timestamp + 4 days);
+        escrow.finalizeTask(taskId);
+
+        TaskEscrowV2.Task memory task = escrow.getTask(taskId);
+        assertEq(uint256(task.status), uint256(TaskEscrowV2.TaskStatus.Finalized));
+        assertEq(task.juryTaskHash, bytes32(0));
+
+        // Jury share without supplier: 10% + 30% of unused 20% = 160
+        uint256 juryPayout = 160 ether;
+        assertEq(token.balanceOf(address(jury)), juryPayout);
+        assertEq(jury.ownerDust(address(token)), juryPayout);
+
+        // Sweepable by jury admin (this test contract)
+        jury.sweepDust(address(token));
+        assertEq(token.balanceOf(address(this)), juryPayout);
+    }
+
     function test_ChallengeFlow_AAContractChallenger_ReceivesERC20Refund() public {
         // AA-style smart account whose receive() always reverts: the old native-ETH
         // payable.transfer refund would brick this flow forever
@@ -885,5 +966,55 @@ contract SmartWalletMock {
 
     receive() external payable {
         revert NoDirectEth();
+    }
+}
+
+/**
+ * @notice ERC-20 that burns a 10% fee on every transfer/transferFrom —
+ *         recipient receives less than the sent amount
+ */
+contract FeeOnTransferTokenMock {
+    string public name = "FEE";
+    string public symbol = "FEE";
+    uint8 public decimals = 18;
+    uint256 public constant FEE_BPS = 1000; // 10%
+
+    uint256 public totalSupply;
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+        totalSupply += amount;
+        emit Transfer(address(0), to, amount);
+    }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        emit Approval(msg.sender, spender, amount);
+        return true;
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        return _move(msg.sender, to, amount);
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        if (allowance[from][msg.sender] != type(uint256).max) {
+            allowance[from][msg.sender] -= amount;
+        }
+        return _move(from, to, amount);
+    }
+
+    function _move(address from, address to, uint256 amount) internal returns (bool) {
+        uint256 fee = (amount * FEE_BPS) / 10000;
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount - fee;
+        totalSupply -= fee; // fee is burned
+        emit Transfer(from, to, amount - fee);
+        return true;
     }
 }
