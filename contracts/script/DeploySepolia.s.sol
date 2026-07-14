@@ -22,25 +22,33 @@ import {ERC20Mock} from "../test/mocks/ERC20Mock.sol";
  *
  * Env (source SuperPaymaster/.env.sepolia):
  *   DEPLOYER_PRIVATE_KEY   required
- *   MYSBT_ADDRESS          optional — ecosystem SBT (recommended); else deploys a fresh MySBT
+ *   MYSBT_ADDRESS          optional — defaults to the ecosystem canonical SBT on Sepolia
+ *                          (MT-4 decision: NEVER deploys a fresh MySBT; must be non-zero)
  *   FEE_RECIPIENT          optional — defaults to deployer
  *   MIN_JUROR_STAKE        optional — defaults to 0
  *   REWARD_TOKEN_ADDRESS   optional — if unset, deploys a mock USDC + mints to deployer
  */
 contract DeploySepolia is Script {
+    /// Ecosystem canonical MySBT on Sepolia (SDK `SBT_ADDRESS`); the drop-custom-MySBT
+    /// decision (MT-4) makes this the default so a bare run never mints a parallel SBT.
+    address internal constant SEPOLIA_CANONICAL_SBT = 0x4867B4302bf4C7818b71F55E53A3520Ee1855Aa7;
+
     function run() external {
         uint256 deployerPk = vm.envUint("DEPLOYER_PRIVATE_KEY");
         address deployer = vm.addr(deployerPk);
         address feeRecipient = vm.envOr("FEE_RECIPIENT", deployer);
-        address existingSbt = vm.envOr("MYSBT_ADDRESS", address(0));
+        address existingSbt = vm.envOr("MYSBT_ADDRESS", SEPOLIA_CANONICAL_SBT);
         address existingRewardToken = vm.envOr("REWARD_TOKEN_ADDRESS", address(0));
         uint256 minJurorStake = vm.envOr("MIN_JUROR_STAKE", uint256(0));
 
+        require(existingSbt != address(0), "MYSBT_ADDRESS must not be zero");
+
         vm.startBroadcast(deployerPk);
 
-        // MyTask uses the ecosystem SBT (drop-custom-MySBT decision) — pass it via
-        // MYSBT_ADDRESS. JuryContract only calls it in try/catch, so any address is safe.
-        MySBT sbt = existingSbt == address(0) ? new MySBT() : MySBT(existingSbt);
+        // MyTask uses the ecosystem SBT (drop-custom-MySBT / MT-4): default = Sepolia
+        // canonical, env-overridable, never deploys a fresh MySBT. JuryContract only
+        // calls it in try/catch, so any live SBT address is safe.
+        MySBT sbt = MySBT(existingSbt);
 
         // Juror staking token — a mock ERC-20 (testnet). Jury requires non-zero.
         ERC20Mock stakingToken = new ERC20Mock("xPNT", "xPNT", 18);
