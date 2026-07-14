@@ -104,6 +104,18 @@ contract JuryContract is IJuryContract {
     mapping(bytes32 => bytes32) private _tagRoles;
     mapping(bytes32 => mapping(address => bool)) private _roles;
 
+    /// @notice Escrow contracts allowed to notify jury-share rewards
+    mapping(address => bool) public authorizedEscrows;
+
+    /// @notice Claimable jury rewards: juror => token => amount (pull pattern)
+    mapping(address => mapping(address => uint256)) public pendingRewards;
+
+    /// @notice Undistributable remainder per token (division dust / no-voter rewards)
+    mapping(address => uint256) public ownerDust;
+
+    /// @dev Simple reentrancy lock for reward transfers
+    uint256 private _reentrancyStatus;
+
     struct ValidationStatus {
         address validatorAddress;
         uint256 agentId;
@@ -118,6 +130,10 @@ contract JuryContract is IJuryContract {
 
     event AdminUpdated(address indexed oldAdmin, address indexed newAdmin);
     event Paused(bool paused);
+    event EscrowAuthorized(address indexed escrow, bool authorized);
+    event RewardNotified(bytes32 indexed taskHash, address indexed token, uint256 amount, uint256 jurorCount);
+    event RewardClaimed(address indexed juror, address indexed token, uint256 amount);
+    event DustSwept(address indexed token, address indexed to, uint256 amount);
     event RoleGranted(bytes32 indexed role, address indexed account);
     event RoleRevoked(bytes32 indexed role, address indexed account);
     event TagRoleSet(bytes32 indexed tag, bytes32 indexed role);
@@ -151,6 +167,13 @@ contract JuryContract is IJuryContract {
     modifier notPaused() {
         require(!paused, "Paused");
         _;
+    }
+
+    modifier nonReentrant() {
+        require(_reentrancyStatus == 0, "Reentrancy");
+        _reentrancyStatus = 1;
+        _;
+        _reentrancyStatus = 0;
     }
 
     function setAdmin(address newAdmin) external onlyAdmin {
@@ -453,6 +476,88 @@ contract JuryContract is IJuryContract {
     /// @inheritdoc IJuryContract
     function isActiveJuror(address juror) external view returns (bool isActive, uint256 stake) {
         return (_jurorActive[juror], _jurorStakes[juror]);
+    }
+
+    // ====================================
+    // Jury Reward Pool (pull pattern)
+    // ====================================
+
+    /**
+     * @notice Register/unregister an escrow contract allowed to call notifyReward
+     */
+    function setAuthorizedEscrow(address escrow, bool authorized) external onlyAdmin {
+        require(escrow != address(0), "Invalid escrow");
+        authorizedEscrows[escrow] = authorized;
+        emit EscrowAuthorized(escrow, authorized);
+    }
+
+    /**
+     * @notice Account a jury-share reward that an authorized escrow has already
+     *         transferred to this contract. Splits `amount` equally among the
+     *         jurors who voted on `taskHash`; the indivisible remainder — or the
+     *         full amount when the task has no votes (e.g. unchallenged escrow
+     *         settlement, taskHash = 0) — accrues to `ownerDust`.
+     * @dev Tokens MUST be transferred to this contract before calling. The caller
+     *      is trusted (admin-registered escrow), so no balance introspection is
+     *      done — this keeps the function compatible with fee-on-transfer-free
+     *      standard ERC-20s used by the escrow.
+     * @param taskHash Jury task the reward relates to (bytes32(0) = no jury task)
+     * @param token ERC-20 token in which the reward was paid
+     * @param amount Reward amount already transferred to this contract
+     */
+    function notifyReward(bytes32 taskHash, address token, uint256 amount) external {
+        require(authorizedEscrows[msg.sender], "Not authorized escrow");
+        require(token != address(0), "Invalid token");
+        if (amount == 0) return;
+
+        Vote[] storage votes = _taskVotes[taskHash];
+        uint256 voterCount = votes.length;
+
+        if (voterCount == 0) {
+            // Defensive: no voters (unchallenged settlement or empty jury task)
+            ownerDust[token] += amount;
+            emit RewardNotified(taskHash, token, amount, 0);
+            return;
+        }
+
+        uint256 perJuror = amount / voterCount;
+        uint256 dust = amount - perJuror * voterCount;
+
+        for (uint256 i = 0; i < voterCount; i++) {
+            pendingRewards[votes[i].juror][token] += perJuror;
+        }
+        if (dust > 0) {
+            ownerDust[token] += dust;
+        }
+
+        emit RewardNotified(taskHash, token, amount, voterCount);
+    }
+
+    /**
+     * @notice Claim accumulated jury rewards for `token` (pull pattern)
+     * @dev State is zeroed before the transfer (checks-effects-interactions)
+     */
+    function claimRewards(address token) external notPaused nonReentrant {
+        uint256 amount = pendingRewards[msg.sender][token];
+        require(amount > 0, "Nothing to claim");
+
+        pendingRewards[msg.sender][token] = 0;
+        require(IERC20(token).transfer(msg.sender, amount), "Reward transfer failed");
+
+        emit RewardClaimed(msg.sender, token, amount);
+    }
+
+    /**
+     * @notice Sweep accumulated dust for `token` to the admin
+     */
+    function sweepDust(address token) external onlyAdmin nonReentrant {
+        uint256 amount = ownerDust[token];
+        require(amount > 0, "Nothing to sweep");
+
+        ownerDust[token] = 0;
+        require(IERC20(token).transfer(admin, amount), "Dust transfer failed");
+
+        emit DustSwept(token, admin, amount);
     }
 
     // ====================================

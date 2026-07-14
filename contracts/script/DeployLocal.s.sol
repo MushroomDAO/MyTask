@@ -47,8 +47,11 @@ contract DeployLocal is Script {
         jury.setRequireJurorRole(false);
         jury.setRequireValidationRequesterRole(false);
 
-        // 4. TaskEscrowV2
-        TaskEscrowV2 escrow = new TaskEscrowV2(address(jury), ACCOUNT_0);
+        // 4. TaskEscrowV2 — challenge stake is ERC-20 (xPNT), AA-compatible
+        TaskEscrowV2 escrow = new TaskEscrowV2(address(jury), ACCOUNT_0, address(stakingToken));
+
+        // Authorize escrow to register jury-share rewards (pull-pattern payouts)
+        jury.setAuthorizedEscrow(address(escrow), true);
 
         // 5. Reward token
         ERC20Mock usdc = new ERC20Mock("USDC", "USDC", 6);

@@ -4,6 +4,7 @@ pragma solidity ^0.8.23;
 import "forge-std/Test.sol";
 import {TaskEscrowV2} from "../src/TaskEscrowV2.sol";
 import {JuryContract} from "../src/JuryContract.sol";
+import {IJuryContract} from "../src/interfaces/IJuryContract.sol";
 import {ERC20Mock} from "./mocks/ERC20Mock.sol";
 
 contract TaskEscrowV2Test is Test {
@@ -22,6 +23,12 @@ contract TaskEscrowV2Test is Test {
     uint256 public constant REWARD = 1000 ether;
     uint256 public constant MIN_STAKE = 100 ether;
     uint256 public constant SUPPLIER_FEE = 150 ether;
+    uint256 public constant CHALLENGE_STAKE = 10e18;
+
+    address public juror1 = address(0x11);
+    address public juror2 = address(0x12);
+    address public juror3 = address(0x13);
+    address public agent = address(0x14);
 
     // For EIP-712 signatures
     uint256 public taskorPrivateKey = 0x12345;
@@ -37,15 +44,21 @@ contract TaskEscrowV2Test is Test {
         // Deploy JuryContract
         jury = new JuryContract(mySBT, address(stakingToken), MIN_STAKE);
 
-        // Deploy TaskEscrowV2
-        escrow = new TaskEscrowV2(address(jury), feeRecipient);
+        // Deploy TaskEscrowV2 (challenge stake = ERC-20 xPNT)
+        escrow = new TaskEscrowV2(address(jury), feeRecipient, address(stakingToken));
+
+        // Authorize escrow to register jury-share rewards
+        jury.setAuthorizedEscrow(address(escrow), true);
 
         // Setup accounts
         token.mint(community, 10000 ether);
+        stakingToken.mint(community, 1000 ether);
 
         // Approve tokens
         vm.prank(community);
         token.approve(address(escrow), type(uint256).max);
+        vm.prank(community);
+        stakingToken.approve(address(escrow), type(uint256).max);
     }
 
     // ====================================
@@ -234,55 +247,182 @@ contract TaskEscrowV2Test is Test {
     }
 
     function test_ChallengeWork() public {
-        bytes32 taskId = _createTask();
+        bytes32 taskId = _createSubmittedTask();
 
-        vm.prank(taskor);
-        escrow.acceptTask(taskId);
+        uint256 communityStakeBefore = stakingToken.balanceOf(community);
 
-        vm.prank(taskor);
-        escrow.submitWork(taskId, "ipfs://evidence");
-
-        // Community challenges
-        vm.deal(community, 1 ether);
+        // Community challenges with ERC-20 stake (no ETH involved)
         vm.prank(community);
-        escrow.challengeWork{value: 0.01 ether}(taskId);
+        escrow.challengeWork(taskId);
 
         TaskEscrowV2.Task memory task = escrow.getTask(taskId);
         assertEq(uint256(task.status), uint256(TaskEscrowV2.TaskStatus.Challenged));
-        assertEq(task.challengeStake, 0.01 ether);
+        assertEq(task.challengeStake, CHALLENGE_STAKE);
+        assertEq(stakingToken.balanceOf(community), communityStakeBefore - CHALLENGE_STAKE);
+        assertEq(stakingToken.balanceOf(address(escrow)), CHALLENGE_STAKE);
     }
 
-    function test_ChallengeWork_RevertInsufficientStake() public {
-        bytes32 taskId = _createTask();
+    function test_ChallengeWork_RevertWithoutApproval() public {
+        bytes32 taskId = _createSubmittedTask();
 
-        vm.prank(taskor);
-        escrow.acceptTask(taskId);
-
-        vm.prank(taskor);
-        escrow.submitWork(taskId, "ipfs://evidence");
-
-        vm.deal(community, 1 ether);
+        // Revoke stake token approval
         vm.prank(community);
-        vm.expectRevert(TaskEscrowV2.InsufficientChallengeStake.selector);
-        escrow.challengeWork{value: 0.001 ether}(taskId); // Below minimum
+        stakingToken.approve(address(escrow), 0);
+
+        vm.prank(community);
+        vm.expectRevert(stdError.arithmeticError);
+        escrow.challengeWork(taskId);
+    }
+
+    function test_ChallengeWork_RevertInsufficientBalance() public {
+        bytes32 taskId = _createSubmittedTask();
+
+        // Drain community's stake token balance
+        stakingToken.burn(community, stakingToken.balanceOf(community));
+
+        vm.prank(community);
+        vm.expectRevert(stdError.arithmeticError);
+        escrow.challengeWork(taskId);
     }
 
     function test_ChallengeWork_RevertAfterPeriod() public {
-        bytes32 taskId = _createTask();
-
-        vm.prank(taskor);
-        escrow.acceptTask(taskId);
-
-        vm.prank(taskor);
-        escrow.submitWork(taskId, "ipfs://evidence");
+        bytes32 taskId = _createSubmittedTask();
 
         // Fast forward past challenge period
         vm.warp(block.timestamp + 4 days);
 
-        vm.deal(community, 1 ether);
         vm.prank(community);
         vm.expectRevert(TaskEscrowV2.ChallengePeriodExpired.selector);
-        escrow.challengeWork{value: 0.01 ether}(taskId);
+        escrow.challengeWork(taskId);
+    }
+
+    function test_SetChallengeStakeConfig() public {
+        ERC20Mock newToken = new ERC20Mock("PNT", "PNT", 18);
+        escrow.setChallengeStakeConfig(address(newToken), 25e18);
+        assertEq(escrow.challengeStakeToken(), address(newToken));
+        assertEq(escrow.challengeStakeAmount(), 25e18);
+
+        vm.prank(community);
+        vm.expectRevert(TaskEscrowV2.NotOwner.selector);
+        escrow.setChallengeStakeConfig(address(newToken), 1e18);
+
+        vm.expectRevert(TaskEscrowV2.ZeroAddress.selector);
+        escrow.setChallengeStakeConfig(address(0), 1e18);
+
+        vm.expectRevert(TaskEscrowV2.ZeroAmount.selector);
+        escrow.setChallengeStakeConfig(address(newToken), 0);
+    }
+
+    // ====================================
+    // Challenge -> Jury Resolution Tests (ERC-20 stake, full flow)
+    // ====================================
+
+    function test_ChallengeFlow_JuryApprovesWork_RefundsChallenger_AndCreditsJurors() public {
+        bytes32 taskId = _createSubmittedTask();
+
+        vm.prank(community);
+        escrow.challengeWork(taskId);
+
+        uint256 communityStakeAfterChallenge = stakingToken.balanceOf(community);
+        uint256 taskorBefore = token.balanceOf(taskor);
+
+        // Jury approves the work (avg 85 >= 50)
+        bytes32 juryTaskHash = _completeJuryTask(80, 90, 85, 0);
+
+        escrow.linkJuryValidation(taskId, juryTaskHash);
+
+        TaskEscrowV2.Task memory task = escrow.getTask(taskId);
+        assertEq(uint256(task.status), uint256(TaskEscrowV2.TaskStatus.Finalized));
+        assertEq(task.juryTaskHash, juryTaskHash);
+
+        // Challenger got the ERC-20 stake back
+        assertEq(stakingToken.balanceOf(community), communityStakeAfterChallenge + CHALLENGE_STAKE);
+        assertEq(stakingToken.balanceOf(address(escrow)), 0);
+
+        // Taskor paid 84% (70% + 70% of unused supplier share)
+        assertEq(token.balanceOf(taskor), taskorBefore + 840 ether);
+
+        // Jury share (10% + 30% of unused supplier share = 160) landed on JuryContract
+        uint256 juryPayout = 160 ether;
+        assertEq(token.balanceOf(address(jury)), juryPayout);
+
+        // ... and was credited equally to the 3 voting jurors (pull pattern)
+        uint256 perJuror = juryPayout / 3;
+        assertEq(jury.pendingRewards(juror1, address(token)), perJuror);
+        assertEq(jury.pendingRewards(juror2, address(token)), perJuror);
+        assertEq(jury.pendingRewards(juror3, address(token)), perJuror);
+        assertEq(jury.ownerDust(address(token)), juryPayout - perJuror * 3);
+
+        // Jurors can actually claim
+        vm.prank(juror1);
+        jury.claimRewards(address(token));
+        assertEq(token.balanceOf(juror1), perJuror);
+        assertEq(jury.pendingRewards(juror1, address(token)), 0);
+    }
+
+    function test_ChallengeFlow_JuryRejectsWork_ForfeitsStakeToTaskor() public {
+        bytes32 taskId = _createSubmittedTask();
+
+        vm.prank(community);
+        escrow.challengeWork(taskId);
+
+        uint256 communityTokenBefore = token.balanceOf(community);
+        uint256 taskorStakeBefore = stakingToken.balanceOf(taskor);
+
+        // Jury rejects the work (avg 10 < 50); positiveThreshold=5 so consensus
+        // still completes the jury task
+        bytes32 juryTaskHash = _completeJuryTask(10, 10, 10, 5);
+
+        escrow.linkJuryValidation(taskId, juryTaskHash);
+
+        TaskEscrowV2.Task memory task = escrow.getTask(taskId);
+        assertEq(uint256(task.status), uint256(TaskEscrowV2.TaskStatus.Refunded));
+
+        // Community got the full reward back
+        assertEq(token.balanceOf(community), communityTokenBefore + REWARD);
+
+        // Challenger's ERC-20 stake was forfeited to the taskor
+        assertEq(stakingToken.balanceOf(taskor), taskorStakeBefore + CHALLENGE_STAKE);
+        assertEq(stakingToken.balanceOf(address(escrow)), 0);
+    }
+
+    function test_ChallengeFlow_AAContractChallenger_ReceivesERC20Refund() public {
+        // AA-style smart account whose receive() always reverts: the old native-ETH
+        // payable.transfer refund would brick this flow forever
+        SmartWalletMock wallet = new SmartWalletMock();
+
+        token.mint(address(wallet), REWARD);
+        stakingToken.mint(address(wallet), CHALLENGE_STAKE);
+
+        wallet.exec(address(token), abi.encodeCall(ERC20Mock.approve, (address(escrow), type(uint256).max)));
+        wallet.exec(address(stakingToken), abi.encodeCall(ERC20Mock.approve, (address(escrow), type(uint256).max)));
+
+        // Wallet is the community: creates, then challenges its own task
+        bytes memory ret = wallet.exec(
+            address(escrow),
+            abi.encodeCall(
+                TaskEscrowV2.createTask,
+                (address(token), REWARD, block.timestamp + 7 days, "ipfs://meta", bytes32("SIMPLE"))
+            )
+        );
+        bytes32 taskId = abi.decode(ret, (bytes32));
+
+        vm.prank(taskor);
+        escrow.acceptTask(taskId);
+        vm.prank(taskor);
+        escrow.submitWork(taskId, "ipfs://evidence");
+
+        wallet.exec(address(escrow), abi.encodeCall(TaskEscrowV2.challengeWork, (taskId)));
+        assertEq(stakingToken.balanceOf(address(wallet)), 0);
+
+        // Jury approves the work -> stake refund flows back to the AA wallet as
+        // an ERC-20 transfer and does NOT revert despite the reverting receive()
+        bytes32 juryTaskHash = _completeJuryTask(80, 90, 85, 0);
+        escrow.linkJuryValidation(taskId, juryTaskHash);
+
+        assertEq(stakingToken.balanceOf(address(wallet)), CHALLENGE_STAKE);
+        TaskEscrowV2.Task memory task = escrow.getTask(taskId);
+        assertEq(uint256(task.status), uint256(TaskEscrowV2.TaskStatus.Finalized));
     }
 
     // ====================================
@@ -665,5 +805,85 @@ contract TaskEscrowV2Test is Test {
             escrow.createTask(
                 address(token), REWARD, block.timestamp + 7 days, "ipfs://task-metadata", bytes32("SIMPLE")
             );
+    }
+
+    function _createSubmittedTask() internal returns (bytes32 taskId) {
+        taskId = _createTask();
+
+        vm.prank(taskor);
+        escrow.acceptTask(taskId);
+
+        vm.prank(taskor);
+        escrow.submitWork(taskId, "ipfs://evidence");
+    }
+
+    function _registerJuror(address juror) internal {
+        stakingToken.mint(juror, MIN_STAKE);
+        vm.prank(juror);
+        stakingToken.approve(address(jury), type(uint256).max);
+        vm.prank(juror);
+        jury.registerJuror(MIN_STAKE);
+    }
+
+    /// @dev Creates and finalizes a jury task with 3 juror votes.
+    ///      `positiveThreshold` = 0 uses the default (50); pass a low value to
+    ///      reach consensus with low scores (jury-rejects-work scenario).
+    function _completeJuryTask(uint8 vote1, uint8 vote2, uint8 vote3, uint8 positiveThreshold)
+        internal
+        returns (bytes32 juryTaskHash)
+    {
+        _registerJuror(juror1);
+        _registerJuror(juror2);
+        _registerJuror(juror3);
+
+        IJuryContract.TaskParams memory params = IJuryContract.TaskParams({
+            agentId: 0,
+            taskType: IJuryContract.TaskType.CONSENSUS_REQUIRED,
+            evidenceUri: "ipfs://jury-evidence",
+            reward: 0,
+            deadline: block.timestamp + 7 days,
+            minJurors: 3,
+            consensusThreshold: 6600,
+            contextId: bytes32(0),
+            contextType: bytes32(0),
+            callbackAddress: address(0),
+            positiveThreshold: positiveThreshold
+        });
+
+        vm.prank(agent);
+        juryTaskHash = jury.createTask(params);
+
+        vm.prank(agent);
+        jury.submitEvidence(juryTaskHash, "ipfs://jury-evidence");
+
+        vm.prank(juror1);
+        jury.vote(juryTaskHash, vote1, "");
+        vm.prank(juror2);
+        jury.vote(juryTaskHash, vote2, "");
+        vm.prank(juror3);
+        jury.vote(juryTaskHash, vote3, "");
+
+        jury.finalizeTask(juryTaskHash);
+
+        IJuryContract.Task memory juryTask = jury.getTask(juryTaskHash);
+        assertEq(uint8(juryTask.status), uint8(IJuryContract.TaskStatus.COMPLETED));
+    }
+}
+
+/**
+ * @notice Minimal AA-style smart account: executes arbitrary calls, but its
+ *         receive() always reverts — the archetype that bricks payable.transfer
+ */
+contract SmartWalletMock {
+    error NoDirectEth();
+
+    function exec(address target, bytes memory data) external returns (bytes memory) {
+        (bool ok, bytes memory ret) = target.call(data);
+        require(ok, "exec failed");
+        return ret;
+    }
+
+    receive() external payable {
+        revert NoDirectEth();
     }
 }
