@@ -12,9 +12,6 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
  *
  * From PayBot/Escrow.sol:
  * - ReentrancyGuard pattern for all fund transfers
- * - EIP-712 typed signatures for gasless operations
- * - Nonces for replay attack protection
- * - EIP-2612 permit integration
  *
  * From Tasks/PointsRecord.sol:
  * - Challenge period mechanism (optimistic completion)
@@ -39,16 +36,6 @@ contract TaskEscrowV2 {
     uint256 public constant DEFAULT_CHALLENGE_PERIOD = 3 days;
     uint256 public constant DEFAULT_CHALLENGE_STAKE = 10e18;
 
-    // EIP-712 Domain
-    bytes32 public immutable DOMAIN_SEPARATOR;
-
-    // EIP-712 TypeHashes
-    bytes32 public constant ACCEPT_TASK_TYPEHASH =
-        keccak256("AcceptTask(bytes32 taskId,address taskor,uint256 nonce,uint256 deadline)");
-
-    bytes32 public constant SUBMIT_WORK_TYPEHASH =
-        keccak256("SubmitWork(bytes32 taskId,string evidenceUri,uint256 nonce,uint256 deadline)");
-
     // ====================================
     // Enums (Enhanced from PointsRecord)
     // ====================================
@@ -60,8 +47,7 @@ contract TaskEscrowV2 {
         Submitted, // Work submitted, in challenge period
         Challenged, // Community challenged, awaiting jury
         Finalized, // Completed and paid
-        Refunded, // Cancelled or expired
-        Disputed // Under jury arbitration
+        Refunded // Cancelled or expired
     }
 
     // ====================================
@@ -105,9 +91,6 @@ contract TaskEscrowV2 {
     error ChallengePeriodNotOver();
     error ChallengePeriodExpired();
     error AlreadyChallenged();
-    error InvalidSignature();
-    error SignatureExpired();
-    error InvalidNonce();
     error ReentrancyDetected();
     error TransferFailed();
     error NotOwner();
@@ -121,6 +104,7 @@ contract TaskEscrowV2 {
     error PolicyViolation();
     error PausedError();
     error InvalidChallengePeriod();
+    error FeeExceedsLimit();
 
     // ====================================
     // State Variables
@@ -141,9 +125,6 @@ contract TaskEscrowV2 {
     uint256 private _reentrancyStatus;
 
     DistributionShares private _distributionShares;
-
-    // Nonces for replay protection (from PayBot)
-    mapping(address => uint256) public nonces;
 
     // Task storage
     mapping(bytes32 => Task) private _tasks;
@@ -188,7 +169,6 @@ contract TaskEscrowV2 {
 
     event TaskCreated(bytes32 indexed taskId, address indexed community, address token, uint256 reward);
     event TaskAccepted(bytes32 indexed taskId, address indexed taskor);
-    event TaskAcceptedWithSignature(bytes32 indexed taskId, address indexed taskor, address indexed relayer);
     event SupplierAssigned(bytes32 indexed taskId, address indexed supplier, uint256 fee);
     event WorkSubmitted(bytes32 indexed taskId, string evidenceUri, uint256 challengeDeadline);
     event TaskChallenged(bytes32 indexed taskId, address indexed challenger, uint256 stake);
@@ -256,17 +236,6 @@ contract TaskEscrowV2 {
         _distributionShares = DistributionShares({
             taskorShare: DEFAULT_TASKOR_SHARE, supplierShare: DEFAULT_SUPPLIER_SHARE, juryShare: DEFAULT_JURY_SHARE
         });
-
-        // EIP-712 Domain Separator (from PayBot)
-        DOMAIN_SEPARATOR = keccak256(
-            abi.encode(
-                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
-                keccak256(bytes("MyTask Escrow")),
-                keccak256(bytes("2")),
-                block.chainid,
-                address(this)
-            )
-        );
     }
 
     function transferOwnership(address newOwner) external onlyOwner {
@@ -348,61 +317,8 @@ contract TaskEscrowV2 {
         emit TaskCreated(taskId, msg.sender, token, reward);
     }
 
-    /**
-     * @notice Create task with EIP-2612 permit (gasless for community)
-     * @dev From PayBot pattern - single transaction token approval + escrow
-     */
-    function createTaskWithPermit(
-        address token,
-        uint256 reward,
-        uint256 deadline,
-        string calldata metadataUri,
-        bytes32 taskType,
-        uint256 permitDeadline,
-        uint8 v,
-        bytes32 r,
-        bytes32 s
-    ) external notPaused nonReentrant returns (bytes32 taskId) {
-        // Execute permit first
-        IERC20Permit(token).permit(msg.sender, address(this), reward, permitDeadline, v, r, s);
-
-        // Then create task (reuse logic)
-        if (reward == 0) revert ZeroAmount();
-        if (deadline <= block.timestamp) revert InvalidDeadline();
-
-        _taskCounter++;
-        taskId = keccak256(abi.encode(msg.sender, _taskCounter, block.timestamp, taskType));
-
-        if (!IERC20(token).transferFrom(msg.sender, address(this), reward)) {
-            revert TransferFailed();
-        }
-
-        _tasks[taskId] = Task({
-            taskId: taskId,
-            community: msg.sender,
-            taskor: address(0),
-            supplier: address(0),
-            token: token,
-            reward: reward,
-            supplierFee: 0,
-            deadline: deadline,
-            createdAt: block.timestamp,
-            challengeDeadline: 0,
-            challengeStake: 0,
-            status: TaskStatus.Open,
-            metadataUri: metadataUri,
-            evidenceUri: "",
-            taskType: taskType,
-            juryTaskHash: bytes32(0)
-        });
-
-        _communityTasks[msg.sender].push(taskId);
-
-        emit TaskCreated(taskId, msg.sender, token, reward);
-    }
-
     // ====================================
-    // Task Acceptance (with signature support from PayBot)
+    // Task Acceptance
     // ====================================
 
     function acceptTask(bytes32 taskId) external notPaused onlyTaskStatus(taskId, TaskStatus.Open) {
@@ -417,37 +333,6 @@ contract TaskEscrowV2 {
         emit TaskAccepted(taskId, msg.sender);
     }
 
-    /**
-     * @notice Accept task with EIP-712 signature (gasless for taskor)
-     * @dev Relayer pays gas, taskor just signs. From PayBot pattern.
-     */
-    function acceptTaskWithSignature(bytes32 taskId, address taskor, uint256 deadline, uint8 v, bytes32 r, bytes32 s)
-        external
-        notPaused
-        onlyTaskStatus(taskId, TaskStatus.Open)
-    {
-        Task storage task = _tasks[taskId];
-        if (block.timestamp >= task.deadline) revert TaskExpired();
-        if (block.timestamp > deadline) revert SignatureExpired();
-
-        // Verify signature
-        bytes32 structHash = keccak256(abi.encode(ACCEPT_TASK_TYPEHASH, taskId, taskor, nonces[taskor], deadline));
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
-        address signer = ecrecover(digest, v, r, s);
-
-        if (signer != taskor) revert InvalidSignature();
-
-        // Increment nonce (replay protection)
-        nonces[taskor]++;
-
-        task.taskor = taskor;
-        task.status = TaskStatus.Accepted;
-
-        _taskorTasks[taskor].push(taskId);
-
-        emit TaskAcceptedWithSignature(taskId, taskor, msg.sender);
-    }
-
     // ====================================
     // Work Submission & Challenge Period (from PointsRecord)
     // ====================================
@@ -460,7 +345,7 @@ contract TaskEscrowV2 {
         if (supplier == address(0)) revert ZeroAddress();
 
         uint256 maxFee = (task.reward * _distributionShares.supplierShare) / BASIS_POINTS;
-        if (fee > maxFee) revert ZeroAmount(); // reusing error for "fee too high"
+        if (fee > maxFee) revert FeeExceedsLimit();
 
         task.supplier = supplier;
         task.supplierFee = fee;
@@ -958,12 +843,4 @@ contract TaskEscrowV2 {
         Task memory task = _tasks[taskId];
         return task.status == TaskStatus.Submitted && block.timestamp > task.challengeDeadline;
     }
-}
-
-/**
- * @notice ERC-20 Permit interface (EIP-2612)
- */
-interface IERC20Permit {
-    function permit(address owner, address spender, uint256 value, uint256 deadline, uint8 v, bytes32 r, bytes32 s)
-        external;
 }

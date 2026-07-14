@@ -16,7 +16,6 @@ contract TaskEscrowV2Test is Test {
     address public community = address(0x1);
     address public taskor = address(0x2);
     address public supplier = address(0x3);
-    address public relayer = address(0x4);
     address public feeRecipient = address(0x5);
     address public mySBT = address(0x6);
 
@@ -30,13 +29,7 @@ contract TaskEscrowV2Test is Test {
     address public juror3 = address(0x13);
     address public agent = address(0x14);
 
-    // For EIP-712 signatures
-    uint256 public taskorPrivateKey = 0x12345;
-    address public taskorSigner;
-
     function setUp() public {
-        taskorSigner = vm.addr(taskorPrivateKey);
-
         // Deploy tokens
         token = new ERC20Mock("USDC", "USDC", 18);
         stakingToken = new ERC20Mock("xPNT", "xPNT", 18);
@@ -174,57 +167,29 @@ contract TaskEscrowV2Test is Test {
     }
 
     // ====================================
-    // EIP-712 Signature Tests (from PayBot)
+    // Supplier Assignment Tests
     // ====================================
 
-    function test_AcceptTaskWithSignature() public {
+    function test_AssignSupplier_RevertFeeExceedsLimit() public {
         bytes32 taskId = _createTask();
 
-        uint256 deadline = block.timestamp + 1 hours;
-        uint256 nonce = escrow.nonces(taskorSigner);
+        vm.prank(taskor);
+        escrow.acceptTask(taskId);
 
-        // Create EIP-712 signature
-        bytes32 structHash = keccak256(abi.encode(escrow.ACCEPT_TASK_TYPEHASH(), taskId, taskorSigner, nonce, deadline));
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", escrow.DOMAIN_SEPARATOR(), structHash));
+        // Max fee = reward * supplierShare (20%) = 200 ether; anything above must revert
+        uint256 maxFee = (REWARD * 2000) / 10000;
 
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(taskorPrivateKey, digest);
+        vm.prank(taskor);
+        vm.expectRevert(TaskEscrowV2.FeeExceedsLimit.selector);
+        escrow.assignSupplier(taskId, supplier, maxFee + 1);
 
-        // Relayer submits signature
-        vm.prank(relayer);
-        escrow.acceptTaskWithSignature(taskId, taskorSigner, deadline, v, r, s);
+        // Exactly at the cap is accepted
+        vm.prank(taskor);
+        escrow.assignSupplier(taskId, supplier, maxFee);
 
         TaskEscrowV2.Task memory task = escrow.getTask(taskId);
-        assertEq(task.taskor, taskorSigner);
-        assertEq(escrow.nonces(taskorSigner), nonce + 1);
-    }
-
-    function test_AcceptTaskWithSignature_RevertInvalidSignature() public {
-        bytes32 taskId = _createTask();
-
-        uint256 deadline = block.timestamp + 1 hours;
-
-        // Wrong signer
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(0x99999, keccak256("wrong"));
-
-        vm.prank(relayer);
-        vm.expectRevert(TaskEscrowV2.InvalidSignature.selector);
-        escrow.acceptTaskWithSignature(taskId, taskorSigner, deadline, v, r, s);
-    }
-
-    function test_AcceptTaskWithSignature_RevertExpiredSignature() public {
-        bytes32 taskId = _createTask();
-
-        uint256 deadline = block.timestamp - 1; // Already expired
-        uint256 nonce = escrow.nonces(taskorSigner);
-
-        bytes32 structHash = keccak256(abi.encode(escrow.ACCEPT_TASK_TYPEHASH(), taskId, taskorSigner, nonce, deadline));
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", escrow.DOMAIN_SEPARATOR(), structHash));
-
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(taskorPrivateKey, digest);
-
-        vm.prank(relayer);
-        vm.expectRevert(TaskEscrowV2.SignatureExpired.selector);
-        escrow.acceptTaskWithSignature(taskId, taskorSigner, deadline, v, r, s);
+        assertEq(task.supplier, supplier);
+        assertEq(task.supplierFee, maxFee);
     }
 
     // ====================================
