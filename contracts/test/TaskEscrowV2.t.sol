@@ -421,6 +421,51 @@ contract TaskEscrowV2Test is Test {
         assertEq(feeToken.balanceOf(community), received - (received * feeToken.FEE_BPS()) / 10000);
     }
 
+    function test_ChallengeWork_ReentrantStakeToken_BlockedByGuard() public {
+        // Malicious stake token re-enters createTask during the transferFrom
+        // inside challengeWork's balance-snapshot window: the shared reentrancy
+        // guard (createTask is now nonReentrant) must kill the whole call
+        ReentrantStakeTokenMock evil = new ReentrantStakeTokenMock(escrow, address(token));
+        escrow.setChallengeStakeConfig(address(evil), CHALLENGE_STAKE);
+
+        evil.mint(community, CHALLENGE_STAKE);
+        vm.prank(community);
+        evil.approve(address(escrow), type(uint256).max);
+
+        bytes32 taskId = _createSubmittedTask();
+
+        vm.prank(community);
+        vm.expectRevert(TaskEscrowV2.ReentrancyDetected.selector);
+        escrow.challengeWork(taskId);
+
+        // Nothing was booked
+        TaskEscrowV2.Task memory task = escrow.getTask(taskId);
+        assertEq(uint256(task.status), uint256(TaskEscrowV2.TaskStatus.Submitted));
+        assertEq(task.challengeStake, 0);
+    }
+
+    function test_ChallengeWork_InflatingStakeToken_CappedAtConfiguredAmount() public {
+        // Second line of defense: a token that delivers MORE than requested
+        // (simulating a polluted snapshot window) gets capped at the configured
+        // stake amount, so resolution can never pay out unrelated funds
+        InflatingStakeTokenMock weird = new InflatingStakeTokenMock();
+        escrow.setChallengeStakeConfig(address(weird), CHALLENGE_STAKE);
+
+        weird.mint(community, CHALLENGE_STAKE);
+        vm.prank(community);
+        weird.approve(address(escrow), type(uint256).max);
+
+        bytes32 taskId = _createSubmittedTask();
+
+        vm.prank(community);
+        escrow.challengeWork(taskId);
+
+        // Escrow actually received 2x, but only the configured amount is booked
+        assertEq(weird.balanceOf(address(escrow)), CHALLENGE_STAKE * 2);
+        TaskEscrowV2.Task memory task = escrow.getTask(taskId);
+        assertEq(task.challengeStake, CHALLENGE_STAKE);
+    }
+
     function test_ChallengeFlow_ConfigChangeMidChallenge_UsesSnapshotToken() public {
         bytes32 taskId = _createSubmittedTask();
 
@@ -966,6 +1011,98 @@ contract SmartWalletMock {
 
     receive() external payable {
         revert NoDirectEth();
+    }
+}
+
+/**
+ * @notice Malicious stake token: during the escrow's transferFrom it re-enters
+ *         TaskEscrowV2.createTask to pollute challengeWork's balance snapshot.
+ *         The inner call must revert with ReentrancyDetected and bubble up.
+ */
+contract ReentrantStakeTokenMock {
+    TaskEscrowV2 public escrow;
+    address public rewardToken;
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    constructor(TaskEscrowV2 _escrow, address _rewardToken) {
+        escrow = _escrow;
+        rewardToken = _rewardToken;
+    }
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        emit Approval(msg.sender, spender, amount);
+        return true;
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        emit Transfer(msg.sender, to, amount);
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        if (msg.sender == address(escrow)) {
+            // Re-enter a deposit entrypoint inside the snapshot window; the
+            // shared guard reverts here and the revert propagates outward
+            escrow.createTask(rewardToken, 1 ether, block.timestamp + 1 days, "evil", bytes32("EVIL"));
+        }
+        if (allowance[from][msg.sender] != type(uint256).max) {
+            allowance[from][msg.sender] -= amount;
+        }
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        emit Transfer(from, to, amount);
+        return true;
+    }
+}
+
+/**
+ * @notice Weird token that credits the recipient DOUBLE the requested amount
+ *         on transferFrom — simulates a polluted balance-snapshot window to
+ *         exercise challengeWork's defensive cap
+ */
+contract InflatingStakeTokenMock {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        emit Approval(msg.sender, spender, amount);
+        return true;
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        emit Transfer(msg.sender, to, amount);
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        if (allowance[from][msg.sender] != type(uint256).max) {
+            allowance[from][msg.sender] -= amount;
+        }
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount * 2; // minted bonus lands in the same window
+        emit Transfer(from, to, amount * 2);
+        return true;
     }
 }
 
