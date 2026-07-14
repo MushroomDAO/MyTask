@@ -37,7 +37,7 @@ contract TaskEscrowV2 {
     uint256 public constant DEFAULT_SUPPLIER_SHARE = 2000; // 20%
     uint256 public constant DEFAULT_JURY_SHARE = 1000; // 10%
     uint256 public constant DEFAULT_CHALLENGE_PERIOD = 3 days;
-    uint256 public constant MIN_CHALLENGE_STAKE = 0.01 ether;
+    uint256 public constant DEFAULT_CHALLENGE_STAKE = 10e18;
 
     // EIP-712 Domain
     bytes32 public immutable DOMAIN_SEPARATOR;
@@ -105,7 +105,6 @@ contract TaskEscrowV2 {
     error ChallengePeriodNotOver();
     error ChallengePeriodExpired();
     error AlreadyChallenged();
-    error InsufficientChallengeStake();
     error InvalidSignature();
     error SignatureExpired();
     error InvalidNonce();
@@ -130,6 +129,12 @@ contract TaskEscrowV2 {
     address public immutable juryContract;
     address public feeRecipient;
     uint256 public challengePeriod;
+
+    /// @notice ERC-20 token required as challenge stake (AA-compatible; no native ETH)
+    address public challengeStakeToken;
+
+    /// @notice Challenge stake amount in `challengeStakeToken` smallest units
+    uint256 public challengeStakeAmount;
     address public owner;
     bool public paused;
     uint256 private _taskCounter;
@@ -148,6 +153,10 @@ contract TaskEscrowV2 {
 
     // Challenge stakes (from PointsRecord pattern)
     mapping(bytes32 => address) private _challengers;
+
+    /// @dev Stake token snapshotted at challenge time, so an owner config change
+    ///      between challenge and resolution can never refund/forfeit the wrong token
+    mapping(bytes32 => address) private _challengeStakeTokens;
 
     mapping(bytes32 => bytes32[]) private _taskReceipts;
     mapping(bytes32 => mapping(bytes32 => bool)) private _taskReceiptAdded;
@@ -190,6 +199,7 @@ contract TaskEscrowV2 {
     event ReceiptLinked(bytes32 indexed taskId, bytes32 indexed receiptId, string receiptUri, address indexed linker);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event Paused(bool paused);
+    event ChallengeStakeConfigUpdated(address indexed token, uint256 amount);
 
     // ====================================
     // Modifiers
@@ -231,12 +241,15 @@ contract TaskEscrowV2 {
     // Constructor
     // ====================================
 
-    constructor(address _juryContract, address _feeRecipient) {
+    constructor(address _juryContract, address _feeRecipient, address _challengeStakeToken) {
         if (_juryContract == address(0)) revert ZeroAddress();
+        if (_challengeStakeToken == address(0)) revert ZeroAddress();
 
         juryContract = _juryContract;
         feeRecipient = _feeRecipient;
         challengePeriod = DEFAULT_CHALLENGE_PERIOD;
+        challengeStakeToken = _challengeStakeToken;
+        challengeStakeAmount = DEFAULT_CHALLENGE_STAKE;
         owner = msg.sender;
         emit OwnershipTransferred(address(0), msg.sender);
 
@@ -275,6 +288,19 @@ contract TaskEscrowV2 {
     function setChallengePeriod(uint256 challengePeriod_) external onlyOwner {
         if (challengePeriod_ == 0) revert InvalidChallengePeriod();
         challengePeriod = challengePeriod_;
+    }
+
+    /**
+     * @notice Configure the ERC-20 challenge stake (token + amount)
+     * @dev Ongoing challenges are unaffected: each challenge snapshots its own
+     *      stake token/amount at challenge time
+     */
+    function setChallengeStakeConfig(address token, uint256 amount) external onlyOwner {
+        if (token == address(0)) revert ZeroAddress();
+        if (amount == 0) revert ZeroAmount();
+        challengeStakeToken = token;
+        challengeStakeAmount = amount;
+        emit ChallengeStakeConfigUpdated(token, amount);
     }
 
     // ====================================
@@ -463,19 +489,29 @@ contract TaskEscrowV2 {
 
     /**
      * @notice Challenge submitted work (community only)
-     * @dev From PointsRecord - requires stake to prevent abuse
+     * @dev From PointsRecord - requires stake to prevent abuse.
+     *      Stake is an ERC-20 (challengeStakeToken) instead of native ETH so that
+     *      AA/contract accounts and gasless users can challenge, and refunds never
+     *      hit the 2300-gas stipend of payable.transfer. Requires prior approve().
      */
-    function challengeWork(bytes32 taskId) external payable notPaused onlyCommunity(taskId) {
+    function challengeWork(bytes32 taskId) external notPaused nonReentrant onlyCommunity(taskId) {
         Task storage task = _tasks[taskId];
         if (task.status != TaskStatus.Submitted) revert InvalidTaskState();
         if (block.timestamp > task.challengeDeadline) revert ChallengePeriodExpired();
-        if (msg.value < MIN_CHALLENGE_STAKE) revert InsufficientChallengeStake();
+
+        address stakeToken = challengeStakeToken;
+        uint256 stakeAmount = challengeStakeAmount;
 
         task.status = TaskStatus.Challenged;
-        task.challengeStake = msg.value;
+        task.challengeStake = stakeAmount;
+        _challengeStakeTokens[taskId] = stakeToken;
         _challengers[taskId] = msg.sender;
 
-        emit TaskChallenged(taskId, msg.sender, msg.value);
+        if (!IERC20(stakeToken).transferFrom(msg.sender, address(this), stakeAmount)) {
+            revert TransferFailed();
+        }
+
+        emit TaskChallenged(taskId, msg.sender, stakeAmount);
     }
 
     /**
@@ -511,7 +547,7 @@ contract TaskEscrowV2 {
     // Jury Resolution (for challenged tasks)
     // ====================================
 
-    function linkJuryValidation(bytes32 taskId, bytes32 juryTaskHash) external notPaused {
+    function linkJuryValidation(bytes32 taskId, bytes32 juryTaskHash) external notPaused nonReentrant {
         Task storage task = _tasks[taskId];
         if (task.status != TaskStatus.Challenged) revert InvalidTaskState();
 
@@ -520,6 +556,10 @@ contract TaskEscrowV2 {
 
         task.juryTaskHash = juryTaskHash;
 
+        // Stake is always the ERC-20 snapshotted at challenge time (AA-compatible,
+        // never payable.transfer with its 2300-gas stipend)
+        IERC20 stakeToken = IERC20(_challengeStakeTokens[taskId]);
+
         // If jury approved (response >= 50), pay out
         if (juryTask.finalResponse >= 50) {
             _distributePayments(taskId);
@@ -527,7 +567,7 @@ contract TaskEscrowV2 {
 
             // Return challenge stake to challenger (they were wrong)
             if (task.challengeStake > 0) {
-                payable(_challengers[taskId]).transfer(task.challengeStake);
+                if (!stakeToken.transfer(_challengers[taskId], task.challengeStake)) revert TransferFailed();
             }
 
             emit ChallengeResolved(taskId, false);
@@ -538,7 +578,7 @@ contract TaskEscrowV2 {
 
             // Challenger stake goes to taskor as compensation
             if (task.challengeStake > 0 && task.taskor != address(0)) {
-                payable(task.taskor).transfer(task.challengeStake);
+                if (!stakeToken.transfer(task.taskor, task.challengeStake)) revert TransferFailed();
             }
 
             emit ChallengeResolved(taskId, true);
@@ -767,6 +807,12 @@ contract TaskEscrowV2 {
 
         if (juryPayout > 0) {
             if (!token.transfer(juryContract, juryPayout)) revert TransferFailed();
+            // Register the reward on the jury side so voters can pull their share
+            // (fixes the fund black hole: tokens sent to JuryContract were
+            // previously unaccounted and permanently locked). Reverts if this
+            // escrow is not authorized on the jury contract — a loud, recoverable
+            // misconfiguration instead of silent fund loss.
+            IJuryContract(juryContract).notifyReward(task.juryTaskHash, task.token, juryPayout);
         }
 
         emit TaskFinalized(taskId, taskorPayout, supplierPayout, juryPayout);

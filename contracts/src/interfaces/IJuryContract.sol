@@ -178,6 +178,26 @@ interface IJuryContract is IERC8004ValidationRegistry {
     function isActiveJuror(address juror) external view returns (bool isActive, uint256 stake);
 
     // ====================================
+    // Jury Reward Pool (pull pattern)
+    // ====================================
+
+    /**
+     * @notice Account a jury-share reward already transferred to the jury contract
+     * @dev Only callable by an admin-authorized escrow. Splits the amount equally
+     *      among the jurors who voted on `taskHash`; remainder accrues as dust.
+     * @param taskHash Jury task the reward relates to (bytes32(0) = no jury task)
+     * @param token ERC-20 token in which the reward was paid
+     * @param amount Reward amount already transferred to the jury contract
+     */
+    function notifyReward(bytes32 taskHash, address token, uint256 amount) external;
+
+    /**
+     * @notice Claim accumulated jury rewards for `token`
+     * @param token ERC-20 token to claim
+     */
+    function claimRewards(address token) external;
+
+    // ====================================
     // View Functions
     // ====================================
 

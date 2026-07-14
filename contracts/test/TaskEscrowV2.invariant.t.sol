@@ -82,7 +82,8 @@ contract TaskEscrowV2InvariantTest is StdInvariant, Test {
         token = new ERC20Mock("USDC", "USDC", 18);
         stakingToken = new ERC20Mock("xPNT", "xPNT", 18);
         jury = new JuryContract(mySBT, address(stakingToken), 100 ether);
-        escrow = new TaskEscrowV2(address(jury), feeRecipient);
+        escrow = new TaskEscrowV2(address(jury), feeRecipient, address(stakingToken));
+        jury.setAuthorizedEscrow(address(escrow), true);
 
         token.mint(community, 1_000_000 ether);
 
