@@ -118,6 +118,35 @@ contract JuryRewardsTest is Test {
         assertEq(jury.ownerDust(address(rewardToken)), 0);
     }
 
+    function test_DuplicateVoteImpossible_NoDoubleAllocation() public {
+        // F1 proof: vote() enforces one vote record per juror per task
+        // (_hasVoted is set BEFORE the push and re-voting reverts), so
+        // notifyReward's per-record split can never double-pay a juror
+        bytes32 taskHash = _completeJuryTask();
+
+        // Re-vote by an existing voter reverts — no second record possible
+        vm.prank(juror1);
+        vm.expectRevert("Already voted");
+        jury.vote(taskHash, 100, "");
+
+        // Exactly one record per juror
+        IJuryContract.Vote[] memory votes = jury.getVotes(taskHash);
+        assertEq(votes.length, 3);
+        assertTrue(votes[0].juror != votes[1].juror);
+        assertTrue(votes[1].juror != votes[2].juror);
+        assertTrue(votes[0].juror != votes[2].juror);
+
+        // Allocation: each juror gets exactly 1/3, nobody is diluted
+        uint256 amount = 90 ether;
+        rewardToken.mint(address(jury), amount);
+        vm.prank(escrow);
+        jury.notifyReward(taskHash, address(rewardToken), amount);
+
+        assertEq(jury.pendingRewards(juror1, address(rewardToken)), 30 ether);
+        assertEq(jury.pendingRewards(juror2, address(rewardToken)), 30 ether);
+        assertEq(jury.pendingRewards(juror3, address(rewardToken)), 30 ether);
+    }
+
     function test_NotifyReward_Accumulates() public {
         bytes32 taskHash = _completeJuryTask();
 

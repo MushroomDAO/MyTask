@@ -12,6 +12,14 @@ import {ERC20Mock} from "../test/mocks/ERC20Mock.sol";
  * unlike DeployLocal.s.sol which uses the anvil burn key). Deploy order is fixed
  * by TaskEscrowV2.juryContract being immutable: (SBT) -> stakingToken -> Jury -> Escrow.
  *
+ * NOTE on broadcast records: the run records committed under
+ * broadcast/DeploySepolia.s.sol/11155111/ were produced by the PRE-P0-fix source
+ * (TaskEscrowV2 two-arg constructor, no jury.setAuthorizedEscrow). The contracts
+ * currently live on Sepolia (escrow 0x421b4d66..., jury 0xa3e6d98b...) therefore
+ * do NOT contain the MT-1/MT-2 fixes. Redeploy with this updated script (MT-8);
+ * the new broadcast records will supersede the old ones. See the README in that
+ * broadcast directory.
+ *
  * Env (source SuperPaymaster/.env.sepolia):
  *   DEPLOYER_PRIVATE_KEY   required
  *   MYSBT_ADDRESS          optional — ecosystem SBT (recommended); else deploys a fresh MySBT

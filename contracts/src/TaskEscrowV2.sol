@@ -503,15 +503,21 @@ contract TaskEscrowV2 {
         uint256 stakeAmount = challengeStakeAmount;
 
         task.status = TaskStatus.Challenged;
-        task.challengeStake = stakeAmount;
         _challengeStakeTokens[taskId] = stakeToken;
         _challengers[taskId] = msg.sender;
 
+        // Fee-on-transfer safe: record the amount ACTUALLY received, not the
+        // configured amount — refund/forfeit later transfers task.challengeStake
+        // in full, and booking more than the real balance would make
+        // linkJuryValidation revert forever, bricking the challenged task
+        uint256 balanceBefore = IERC20(stakeToken).balanceOf(address(this));
         if (!IERC20(stakeToken).transferFrom(msg.sender, address(this), stakeAmount)) {
             revert TransferFailed();
         }
+        uint256 received = IERC20(stakeToken).balanceOf(address(this)) - balanceBefore;
+        task.challengeStake = received;
 
-        emit TaskChallenged(taskId, msg.sender, stakeAmount);
+        emit TaskChallenged(taskId, msg.sender, received);
     }
 
     /**
