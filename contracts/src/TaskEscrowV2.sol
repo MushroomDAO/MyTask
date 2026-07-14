@@ -310,6 +310,7 @@ contract TaskEscrowV2 {
     function createTask(address token, uint256 reward, uint256 deadline, string calldata metadataUri, bytes32 taskType)
         external
         notPaused
+        nonReentrant
         returns (bytes32 taskId)
     {
         if (reward == 0) revert ZeroAmount();
@@ -361,7 +362,7 @@ contract TaskEscrowV2 {
         uint8 v,
         bytes32 r,
         bytes32 s
-    ) external notPaused returns (bytes32 taskId) {
+    ) external notPaused nonReentrant returns (bytes32 taskId) {
         // Execute permit first
         IERC20Permit(token).permit(msg.sender, address(this), reward, permitDeadline, v, r, s);
 
@@ -515,6 +516,11 @@ contract TaskEscrowV2 {
             revert TransferFailed();
         }
         uint256 received = IERC20(stakeToken).balanceOf(address(this)) - balanceBefore;
+        // Defensive cap: an honest transfer can only deliver <= the configured
+        // amount; any excess means the snapshot window was polluted by a
+        // concurrent deposit (all deposit entrypoints share the reentrancy
+        // guard, so this is a second line of defense)
+        if (received > stakeAmount) received = stakeAmount;
         task.challengeStake = received;
 
         emit TaskChallenged(taskId, msg.sender, received);
