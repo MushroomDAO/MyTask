@@ -423,9 +423,11 @@ contract TaskEscrowV2Test is Test {
 
     function test_ChallengeWork_ReentrantStakeToken_BlockedByGuard() public {
         // Malicious stake token re-enters createTask during the transferFrom
-        // inside challengeWork's balance-snapshot window: the shared reentrancy
-        // guard (createTask is now nonReentrant) must kill the whole call
-        ReentrantStakeTokenMock evil = new ReentrantStakeTokenMock(escrow, address(token));
+        // inside challengeWork's balance-snapshot window, depositing ITSELF as
+        // the reward token — the exact same-token deposit that would pollute
+        // the snapshot. The shared reentrancy guard (createTask is now
+        // nonReentrant) must kill the whole call.
+        ReentrantStakeTokenMock evil = new ReentrantStakeTokenMock(escrow);
         escrow.setChallengeStakeConfig(address(evil), CHALLENGE_STAKE);
 
         evil.mint(community, CHALLENGE_STAKE);
@@ -1016,21 +1018,23 @@ contract SmartWalletMock {
 
 /**
  * @notice Malicious stake token: during the escrow's transferFrom it re-enters
- *         TaskEscrowV2.createTask to pollute challengeWork's balance snapshot.
- *         The inner call must revert with ReentrancyDetected and bubble up.
+ *         TaskEscrowV2.createTask using ITSELF as the reward token — i.e. it
+ *         deposits the same stake token into the escrow inside challengeWork's
+ *         balance-snapshot window, the exact vector that would inflate
+ *         task.challengeStake. The inner call must revert with
+ *         ReentrancyDetected and bubble up.
  */
 contract ReentrantStakeTokenMock {
     TaskEscrowV2 public escrow;
-    address public rewardToken;
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
+    bool private _attacking;
 
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
 
-    constructor(TaskEscrowV2 _escrow, address _rewardToken) {
+    constructor(TaskEscrowV2 _escrow) {
         escrow = _escrow;
-        rewardToken = _rewardToken;
     }
 
     function mint(address to, uint256 amount) external {
@@ -1051,10 +1055,17 @@ contract ReentrantStakeTokenMock {
     }
 
     function transferFrom(address from, address to, uint256 amount) external returns (bool) {
-        if (msg.sender == address(escrow)) {
-            // Re-enter a deposit entrypoint inside the snapshot window; the
-            // shared guard reverts here and the revert propagates outward
-            escrow.createTask(rewardToken, 1 ether, block.timestamp + 1 days, "evil", bytes32("EVIL"));
+        if (msg.sender == address(escrow) && !_attacking) {
+            _attacking = true;
+            // Fully-formed attack: fund and approve ourselves, then deposit
+            // THIS same stake token as a task reward inside the snapshot
+            // window. Without the shared guard this createTask would move
+            // 1 ether of this token into the escrow between balanceBefore and
+            // balanceAfter, inflating task.challengeStake by unrelated funds.
+            balanceOf[address(this)] += 1 ether;
+            allowance[address(this)][address(escrow)] = type(uint256).max;
+            escrow.createTask(address(this), 1 ether, block.timestamp + 1 days, "evil", bytes32("EVIL"));
+            _attacking = false;
         }
         if (allowance[from][msg.sender] != type(uint256).max) {
             allowance[from][msg.sender] -= amount;
