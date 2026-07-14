@@ -1,22 +1,18 @@
-# Sepolia (11155111) 部署记录说明
+# Sepolia broadcast records
 
-本目录下已入库的 run 记录(`run-1783707098717.json` / `run-latest.json`)是
-**P0 修复之前**旧源码的真实部署历史,保留用于追溯当前线上合约:
+**Current deployment (MT-8, 2026-07-14, post-P0-fix bytecode)** — `run-latest.json`:
 
-| 合约 | 地址 |
+| Contract | Address |
 |---|---|
-| JuryContract | `0xa3e6d98b992bcf31be0d1af4670c675264005fa8` |
-| TaskEscrowV2 | `0x421b4d66c82cef6432dfe340208487f27bae8011` |
-| StakingToken (ERC20Mock xPNT) | `0x02a24816524e02149180bc4deecc1dc0d042ff75` |
-| RewardToken (ERC20Mock USDC) | `0x959f87797f54b5fcf8fc9d8f7f7cf4f1881c8e36` |
+| TaskEscrowV2 (3-arg ctor, ERC-20 challenge stake) | `0x171234DD282eF2909ec20dafC3F81deBa6761178` |
+| JuryContract (pull-claim rewards, setAuthorizedEscrow ✓) | `0x63f38d996d5D2784Da135f1B8B164c97a71e0161` |
+| MySBT | ecosystem canonical `0x4867B4302bf4C7818b71F55E53A3520Ee1855Aa7` (NOT deployed by this script — MT-4) |
+| StakingToken (mock xPNT, 18d) | `0xDbdaa6793e4F1b856baA7F8fd84F2E6aEE69ab09` |
+| RewardToken (mock USDC, 6d) | `0x96C74b26ee4b7b57d576cf97b773906Cc7EE4E5B` |
 
-注意与当前源码的差异:
+All verified on Etherscan. On-chain checks: `jury.authorizedEscrows(escrow) == true`, `escrow.challengeStakeToken() == xPNT`.
 
-- 该次部署的 `TaskEscrowV2` 是**两参 constructor**(无 `challengeStakeToken`),
-  挑战质押仍为原生 ETH(MT-2 修复前);
-- 部署流程**没有调用** `jury.setAuthorizedEscrow(escrow, true)`,
-  JuryContract 也没有 `notifyReward` 奖励池(MT-1 修复前),
-  即线上合约仍存在 jury 分成资金黑洞与 AA 挑战不可用问题。
-
-因此**线上合约不含 P0 修复,不要在其上继续集成**。修复合并后需按 MT-8 用
-更新后的 `script/DeploySepolia.s.sol` 重新部署,届时以新的 broadcast 记录为准。
+**Historical (pre-P0-fix)** — earlier run files record the ORIGINAL deployment
+(TaskEscrowV2 two-arg constructor, no `setAuthorizedEscrow`; escrow `0x421b4d66…`,
+jury `0xa3e6d98b…`). Those contracts remain on Sepolia but are SUPERSEDED — do not
+point new clients at them (jury share black-hole + native-ETH challenge stake).
