@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../aastar-sdk"
+		},
+		{
+			"path": "../SuperPaymaster"
+		},
+		{
+			"path": "../MyShop"
+		}
+	],
+	"settings": {}
+}
